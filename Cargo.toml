@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "blazing-css",
+    "blazing-css-macro",
+    "blazing-css-core",
+    "blazing-css-cli",
+    "example-project",
+]
+resolver = "2"

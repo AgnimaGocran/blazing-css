@@ -1,0 +1,11 @@
+[package]
+name = "blazing-css-macro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+blazing-css-core = { path = "../blazing-css-core" }
+proc-macro2 = "1"

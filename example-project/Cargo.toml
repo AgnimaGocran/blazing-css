@@ -1,0 +1,10 @@
+[package]
+name = "example-project"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blazing-css = { path = "../blazing-css" }
+
+[build-dependencies]
+blazing-css = { path = "../blazing-css" }

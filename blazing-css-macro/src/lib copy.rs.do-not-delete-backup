@@ -1,0 +1,19 @@
+use proc_macro::{Literal, Span, TokenStream, TokenTree};
+
+/*
+    TokenStream::from_str("::core::panic::Location::caller().file()")
+        .expect("failed to build go! macro output")
+*/
+
+/// Expands directly into a string literal with the call-site file path.
+#[proc_macro]
+pub fn go(_input: TokenStream) -> TokenStream {
+    let span = Span::call_site();
+    let path = span
+        .local_file()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| span.file());
+
+    let literal = Literal::string(&path);
+    TokenStream::from(TokenTree::Literal(literal))
+}

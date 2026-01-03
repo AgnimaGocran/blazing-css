@@ -1,0 +1,12 @@
+[package]
+name = "blazing-css-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+blazing-css = { path = "../blazing-css" }
+cargo_metadata = "0.18"
+clap = { version = "4.5", features = ["derive"] }
+notify = { version = "5.1", default-features = true }
+owo-colors = "4.1"
