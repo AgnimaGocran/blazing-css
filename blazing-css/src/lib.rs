@@ -6,11 +6,10 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use blazing_css_core::{canonical_segments, hash_css_body};
+use blazing_css_core::{canonical_segments_from_stream, hash_css_segments};
+pub use blazing_css_macro::css;
 use itertools::Itertools;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
-
-pub use blazing_css_macro::css;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -29,7 +28,9 @@ pub fn render_css(file_name: &str) -> Result<(), Box<dyn Error>> {
 	render_css_with_options(file_name, RenderOptions::default())
 }
 
-pub fn render_css_with_options(file_name: &str, options: RenderOptions) -> Result<(), Box<dyn Error>> {
+pub fn render_css_with_options(
+	file_name: &str, options: RenderOptions,
+) -> Result<(), Box<dyn Error>> {
 	let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
 	if options.emit_cargo_directives {
 		println!("cargo:rerun-if-changed=build.rs");
@@ -89,10 +90,12 @@ fn scan_stream(stream: TokenStream, entries: &mut Vec<MacroEntry>) {
 					iter.next();
 					if let Some(TokenTree::Group(group)) = iter.next() {
 						if group.delimiter() == Delimiter::Brace {
-							let body = group.stream().to_string();
-							let segments = canonical_segments(&body);
-							let hash = hash_css_body(&body);
+							let inner = group.stream();
+							let segments = canonical_segments_from_stream(&inner);
+							let hash = hash_css_segments(&segments);
 							entries.push(MacroEntry { hash, segments });
+							scan_stream(inner, entries);
+							continue;
 						}
 						scan_stream(group.stream(), entries);
 						continue;
