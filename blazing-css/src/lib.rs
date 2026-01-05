@@ -6,7 +6,7 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use blazing_css_core::{canonical_segments_from_stream, hash_css_segments};
+use blazing_css_core::{canonical_segments, canonical_segments_from_stream, hash_css_segments};
 pub use blazing_css_macro::css;
 use itertools::Itertools;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -152,7 +152,12 @@ fn format_css_block(hash: &str, segments: &[String]) -> String {
 }
 
 fn format_css_segments(segments: &[String]) -> String {
-	segments
+	if segments.is_empty() {
+		return String::new();
+	}
+
+	let canonicalized = canonical_segments(&segments.join(";"));
+	canonicalized
 		.iter()
 		.map(|segment| format!("\t{};", segment))
 		.collect::<Vec<_>>()
