@@ -1,0 +1,6 @@
+[*.{rs,js,jsx,cjs,mjs,ts,tsx,json}]
+indent_style = tab
+indent_size = tab
+tab_size = 4
+insert_final_newline = false
+trim_trailing_whitespace = true

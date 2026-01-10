@@ -3,6 +3,36 @@ use xxhash_rust::xxh32::xxh32;
 
 const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+/// Checks if a value is an array (starts with '[' and ends with ']')
+pub fn is_array_value(value: &str) -> bool {
+	let trimmed = value.trim();
+	trimmed.starts_with('[') && trimmed.ends_with(']')
+}
+
+/// Parses an array value and returns the list of values inside brackets
+/// Returns None if the value is not a valid array format
+pub fn parse_array_value(value: &str) -> Option<Vec<String>> {
+	let trimmed = value.trim();
+	if !is_array_value(trimmed) {
+		return None;
+	}
+
+	// Remove the outer brackets
+	let inner = &trimmed[1..trimmed.len() - 1];
+	if inner.is_empty() {
+		return Some(Vec::new());
+	}
+
+	// Split by comma and trim each value
+	let values: Vec<String> = inner
+		.split(',')
+		.map(|v| v.trim().to_string())
+		.filter(|v| !v.is_empty())
+		.collect();
+
+	Some(values)
+}
+
 pub fn encode_hash(mut value: u32) -> String {
 	let base = ALPHABET.len() as u32;
 	if value == 0 {
@@ -68,7 +98,9 @@ fn normalize_segment(segment: &str) -> String {
 		}
 	}
 
-	result.trim().to_string()
+	let trimmed = result.trim();
+	// Remove space before colons in array values like [value1, value2]
+	trimmed.replace(" :", ":").replace(" ;", ";").to_string()
 }
 
 pub fn canonical_segments_from_stream(stream: &TokenStream2) -> Vec<String> {

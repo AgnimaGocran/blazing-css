@@ -40,6 +40,9 @@ struct CommandArgs {
 	/// Output CSS path relative to each project root
 	#[arg(value_name = "OUTPUT")]
 	output: PathBuf,
+	/// Breakpoints for responsive design (comma separated, e.g., 500,1000,2000)
+	#[arg(long, value_name = "PX", value_delimiter = ',')]
+	break_points: Option<Vec<u32>>,
 }
 
 #[derive(Clone)]
@@ -67,7 +70,7 @@ fn main() -> Result<()> {
 fn run_render(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
 	for project in &projects {
-		render_project(project, &args.output)?;
+		render_project(project, &args.output, args.break_points.clone())?;
 	}
 	Ok(())
 }
@@ -75,12 +78,12 @@ fn run_render(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Res
 fn run_watch(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
 	for project in &projects {
-		render_project(project, &args.output)?;
+		render_project(project, &args.output, args.break_points.clone())?;
 	}
-	watch_projects(projects, args.output.clone())
+	watch_projects(projects, args.output.clone(), args.break_points.clone())
 }
 
-fn render_project(project: &Project, output_template: &Path) -> Result<()> {
+fn render_project(project: &Project, output_template: &Path, break_points: Option<Vec<u32>>) -> Result<()> {
 	let destination = destination_path(project, output_template);
 	if let Some(parent) = destination.parent() {
 		fs::create_dir_all(parent).with_context(|| {
@@ -97,13 +100,14 @@ fn render_project(project: &Project, output_template: &Path) -> Result<()> {
 	env::set_var("CARGO_MANIFEST_DIR", &project.root);
 	let options = RenderOptions {
 		emit_cargo_directives: false,
+		break_points,
 	};
 	render_css_with_options(&arg_value, options)
 		.map_err(|err| anyhow!("failed to render CSS for {}: {err}", project.name))?;
 	Ok(())
 }
 
-fn watch_projects(projects: Vec<Project>, output_template: PathBuf) -> Result<()> {
+fn watch_projects(projects: Vec<Project>, output_template: PathBuf, break_points: Option<Vec<u32>>) -> Result<()> {
 	let (tx, rx) = channel::<WatchMessage>();
 	let mut watchers = Vec::new();
 
@@ -144,7 +148,7 @@ fn watch_projects(projects: Vec<Project>, output_template: PathBuf) -> Result<()
 
 				if let Some(project) = projects.get(idx) {
 					log_changed_paths(project, &rust_paths);
-					if let Err(err) = render_project(project, &output_template) {
+					if let Err(err) = render_project(project, &output_template, break_points.clone()) {
 						log_error(format!(
 							"failed to rebuild {}: {err:#}",
 							project.name

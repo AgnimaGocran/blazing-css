@@ -1,3 +1,4 @@
+mod media;
 mod probe;
 
 use blazing_css::css;
@@ -8,4 +9,5 @@ fn main() {
 		padding: 33px;
 	});
 	probe::print_path();
+	media::print_path();
 }

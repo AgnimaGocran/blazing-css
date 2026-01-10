@@ -1,13 +1,13 @@
 # blazing-css
 
-`blazing-css` is a small Rust toolchain for generating CSS classes during your build. You write styles directly in the `css! { ... }` macro, get  a stable hashed class name back, and let either the build-script helper or the CLI (`bzc`) gather every macro call into a final `styles.css`.
+`blazing-css` is a small Rust toolchain for generating CSS classes during your build. You write styles directly in the `css! { ... }` macro, get a stable hashed class name back, and let either the build-script helper or the CLI (`bzc`) gather every macro call into a final `styles.css`.
 
 ## Repository layout
-- `blazing-css` — public API; re-exports the `css!` macro and exposes `render_css(_with_options)` helpers for build scripts.
-- `blazing-css-macro` — the procedural macro that canonicalizes CSS segments and produces the hashed class.
-- `blazing-css-core` — shared parsing, normalization, and hashing utilities.
-- `blazing-css-cli` (`bzc`) — command-line tool that renders once or watches your sources and rewrites CSS on every change.
-- `example-project` — a minimal consumer; use it as a reference template.
+- `blazing-css` - public API; re-exports the `css!` macro and exposes `render_css(_with_options)` helpers for build scripts.
+- `blazing-css-macro` - the procedural macro that canonicalizes CSS segments and produces the hashed class.
+- `blazing-css-core` - shared parsing, normalization, and hashing utilities.
+- `blazing-css-cli` (`bzc`) - command-line tool that renders once or watches your sources and rewrites CSS on every change.
+- `example-project` - a minimal consumer; use it as a reference template.
 
 ## Installation
 
@@ -24,7 +24,7 @@ Set up a `build.rs` that writes CSS relative to `CARGO_MANIFEST_DIR`:
 ```rust
 // build.rs
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    blazing_css::render_css("assets/styles.css")
+  blazing_css::render_css("assets/styles.css")
 }
 ```
 
@@ -34,15 +34,15 @@ Inside your Rust sources, call the macro; it returns the hashed class string:
 use blazing_css::css;
 
 fn render_button() -> String {
-    format!(
-        r#"<button class="{class}">Button</button>"#,
-        class = css! {
-            padding: 12px 20px;
-            background: linear-gradient(90deg, #ff7a18, #af002d 70%);
-            border: none;
-            color: white;
-        }
-    )
+  format!(
+    r#"<button class="{class}">Button</button>"#,
+    class = css! {
+      padding: 12px 20px;
+      background: linear-gradient(90deg, #ff7a18, #af002d 70%);
+      border: none;
+      color: white;
+    }
+  )
 }
 ```
 
@@ -72,7 +72,7 @@ Usage:
 bzc render [--project web,ui] assets/styles.css
 
 # Watch for changes
-bzc watch  [--project web,ui] assets/styles.css
+bzc watch [--project web,ui] assets/styles.css
 ```
 
 - Without `--project`, the current directory is treated as a single project.
