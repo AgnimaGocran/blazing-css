@@ -37,9 +37,9 @@ struct CommandArgs {
 	/// Explicit set of project names (comma separated or repeated)
 	#[arg(short = 'p', long, value_name = "NAME", value_delimiter = ',')]
 	project: Vec<String>,
-	/// Output CSS path relative to each project root
-	#[arg(value_name = "OUTPUT")]
-	output: PathBuf,
+	/// Output CSS path(s) relative to each project root (comma separated for multiple outputs)
+	#[arg(value_name = "OUTPUT", value_delimiter = ',')]
+	output: Vec<String>,
 	/// Breakpoints for responsive design (comma separated, e.g., 500,1000,2000)
 	#[arg(long, value_name = "PX", value_delimiter = ',')]
 	break_points: Option<Vec<u32>>,
@@ -49,6 +49,80 @@ struct CommandArgs {
 struct Project {
 	name: String,
 	root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct OutputSpec {
+	target_crate: Option<String>,
+	path: PathBuf,
+}
+
+fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
+	let spec = spec.trim();
+	if spec.is_empty() {
+		return Err(anyhow!("output spec cannot be empty"));
+	}
+
+	if spec.starts_with('$') {
+		// Parse $crate/path format
+		let rest = &spec[1..];
+		let slash_idx = rest.find('/').ok_or_else(|| {
+			anyhow!("invalid $crate syntax: expected $crate/path, got ${}", spec)
+		})?;
+
+		let crate_name = &rest[..slash_idx];
+		if crate_name.is_empty() {
+			return Err(anyhow!("crate name cannot be empty in ${}", spec));
+		}
+
+		let path_str = &rest[slash_idx + 1..];
+		let path = if path_str.is_empty() {
+			PathBuf::from(".")
+		} else {
+			PathBuf::from(path_str)
+		};
+
+		Ok(OutputSpec {
+			target_crate: Some(crate_name.to_string()),
+			path,
+		})
+	} else {
+		// Simple path without target crate
+		Ok(OutputSpec {
+			target_crate: None,
+			path: PathBuf::from(spec),
+		})
+	}
+}
+
+fn resolve_output_mapping(
+	outputs: &[String],
+	projects: &[Project],
+	_workspace: Option<&WorkspaceInventory>,
+) -> Result<Vec<(Project, OutputSpec)>> {
+	let output_specs: Vec<OutputSpec> = outputs
+		.iter()
+		.map(|s| parse_output_spec(s))
+		.collect::<Result<_>>()?;
+
+	match output_specs.len() {
+		0 => Err(anyhow!("at least one output must be specified")),
+		1 => {
+			// Single output for all projects (broadcast)
+			let spec = output_specs.into_iter().next().unwrap();
+			Ok(projects.iter().cloned().map(|p| (p, spec.clone())).collect())
+		}
+		n if n == projects.len() => {
+			// 1:1 mapping by order
+			Ok(projects.iter().cloned().zip(output_specs).collect())
+		}
+		n => Err(anyhow!(
+			"number of outputs ({}) must be 1 or equal to number of projects ({}), got {}",
+			n,
+			projects.len(),
+			n
+		)),
+	}
 }
 
 fn main() -> Result<()> {
@@ -69,29 +143,33 @@ fn main() -> Result<()> {
 
 fn run_render(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
-	for project in &projects {
-		render_project(project, &args.output, args.break_points.clone())?;
+	let output_mapping = resolve_output_mapping(&args.output, &projects, workspace)?;
+
+	for (project, output_spec) in &output_mapping {
+		render_project(project, output_spec, args.break_points.clone())?;
 	}
 	Ok(())
 }
 
 fn run_watch(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
-	for project in &projects {
-		render_project(project, &args.output, args.break_points.clone())?;
+	let output_mapping = resolve_output_mapping(&args.output, &projects, workspace)?;
+
+	for (project, output_spec) in &output_mapping {
+		render_project(project, output_spec, args.break_points.clone())?;
 	}
-	watch_projects(projects, args.output.clone(), args.break_points.clone())
+	watch_projects(projects, output_mapping, args.break_points.clone())
 }
 
-fn render_project(project: &Project, output_template: &Path, break_points: Option<Vec<u32>>) -> Result<()> {
-	let destination = destination_path(project, output_template);
+fn render_project(project: &Project, output_spec: &OutputSpec, break_points: Option<Vec<u32>>) -> Result<()> {
+	let destination = destination_path(project, output_spec);
 	if let Some(parent) = destination.parent() {
 		fs::create_dir_all(parent).with_context(|| {
 			format!("failed to create output directory {}", parent.display())
 		})?;
 	}
 
-	let arg_value = output_argument(output_template, &destination);
+	let arg_value = output_argument(output_spec, &destination);
 	log_action(format!(
 		"generating CSS for {} -> {}",
 		project.name,
@@ -107,7 +185,11 @@ fn render_project(project: &Project, output_template: &Path, break_points: Optio
 	Ok(())
 }
 
-fn watch_projects(projects: Vec<Project>, output_template: PathBuf, break_points: Option<Vec<u32>>) -> Result<()> {
+fn watch_projects(
+	projects: Vec<Project>,
+	output_mapping: Vec<(Project, OutputSpec)>,
+	break_points: Option<Vec<u32>>,
+) -> Result<()> {
 	let (tx, rx) = channel::<WatchMessage>();
 	let mut watchers = Vec::new();
 
@@ -146,9 +228,9 @@ fn watch_projects(projects: Vec<Project>, output_template: PathBuf, break_points
 					continue;
 				}
 
-				if let Some(project) = projects.get(idx) {
+				if let Some((project, output_spec)) = output_mapping.get(idx) {
 					log_changed_paths(project, &rust_paths);
-					if let Err(err) = render_project(project, &output_template, break_points.clone()) {
+					if let Err(err) = render_project(project, output_spec, break_points.clone()) {
 						log_error(format!(
 							"failed to rebuild {}: {err:#}",
 							project.name
@@ -441,18 +523,33 @@ fn canonicalize(path: &Path) -> PathBuf {
 	path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn destination_path(project: &Project, output_template: &Path) -> PathBuf {
-	if output_template.is_absolute() {
-		output_template.to_path_buf()
+fn destination_path(project: &Project, output_spec: &OutputSpec) -> PathBuf {
+	let base = if let Some(ref crate_name) = output_spec.target_crate {
+		// Find the target crate in workspace
+		let workspace = WorkspaceInventory::load().ok();
+		if let Some(ws) = workspace {
+			if let Some(path) = ws.path_by_name(crate_name) {
+				path
+			} else {
+				log_warn(format!("crate '{}' not found in workspace, using project root", crate_name));
+				project.root.clone()
+			}
+		} else {
+			log_warn(format!("workspace not available, using project root for $crate '{}'", crate_name));
+			project.root.clone()
+		}
 	} else {
-		project.root.join(output_template)
+		project.root.clone()
+	};
+
+	if output_spec.path.is_absolute() {
+		output_spec.path.clone()
+	} else {
+		base.join(&output_spec.path)
 	}
 }
 
-fn output_argument(output_template: &Path, destination: &Path) -> String {
-	if output_template.is_absolute() {
-		destination.to_string_lossy().to_string()
-	} else {
-		output_template.to_string_lossy().to_string()
-	}
+fn output_argument(output_spec: &OutputSpec, destination: &Path) -> String {
+	// Always return the absolute destination path for rendering
+	destination.to_string_lossy().to_string()
 }
