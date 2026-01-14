@@ -547,6 +547,12 @@ fn destination_path(project: &Project, output_spec: &OutputSpec) -> PathBuf {
 		// If the absolute path is within the base directory, make it relative
 		if let Ok(relative) = output_spec.path.strip_prefix(&base) {
 			base.join(relative)
+		} else if output_spec.path.starts_with("/") {
+			// Handle paths like "/assets/file.css" (from empty shell variables)
+			// by stripping the leading "/" and making it relative to base
+			let path_str = output_spec.path.to_string_lossy();
+			let relative_path = path_str.strip_prefix('/').unwrap_or(&path_str);
+			base.join(relative_path)
 		} else {
 			// Keep absolute path if it's outside the base directory
 			output_spec.path.clone()
