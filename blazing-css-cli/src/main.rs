@@ -114,11 +114,14 @@ fn resolve_output_mapping(
 		for output_spec in output_specs {
 			let crate_name = output_spec.target_crate.as_ref().unwrap();
 
-			// Find the target project
+			// Find target project in workspace
 			let target_project = if let Some(ws) = workspace {
 				if let Some(path) = ws.path_by_name(crate_name) {
-					projects.iter().find(|p| p.root == path).cloned()
-						.ok_or_else(|| anyhow!("crate '{}' not found in projects list", crate_name))?
+					// Create a Project with the crate's name and path from workspace
+					Project {
+						name: crate_name.clone(),
+						root: path,
+					}
 				} else {
 					return Err(anyhow!("crate '{}' not found in workspace", crate_name));
 				}
