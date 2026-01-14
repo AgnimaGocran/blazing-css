@@ -98,30 +98,57 @@ fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
 fn resolve_output_mapping(
 	outputs: &[String],
 	projects: &[Project],
-	_workspace: Option<&WorkspaceInventory>,
+	workspace: Option<&WorkspaceInventory>,
 ) -> Result<Vec<(Project, OutputSpec)>> {
 	let output_specs: Vec<OutputSpec> = outputs
 		.iter()
 		.map(|s| parse_output_spec(s))
 		.collect::<Result<_>>()?;
 
-	match output_specs.len() {
-		0 => Err(anyhow!("at least one output must be specified")),
-		1 => {
-			// Single output for all projects (broadcast)
-			let spec = output_specs.into_iter().next().unwrap();
-			Ok(projects.iter().cloned().map(|p| (p, spec.clone())).collect())
+	// Check if all outputs use $crate syntax
+	let all_use_crate_syntax = output_specs.iter().all(|spec| spec.target_crate.is_some());
+
+	if all_use_crate_syntax {
+		// Each output specifies its target crate explicitly
+		let mut mapping = Vec::new();
+		for output_spec in output_specs {
+			let crate_name = output_spec.target_crate.as_ref().unwrap();
+
+			// Find the target project
+			let target_project = if let Some(ws) = workspace {
+				if let Some(path) = ws.path_by_name(crate_name) {
+					projects.iter().find(|p| p.root == path).cloned()
+						.ok_or_else(|| anyhow!("crate '{}' not found in projects list", crate_name))?
+				} else {
+					return Err(anyhow!("crate '{}' not found in workspace", crate_name));
+				}
+			} else {
+				return Err(anyhow!("workspace not available for $crate syntax"));
+			};
+
+			mapping.push((target_project, output_spec));
 		}
-		n if n == projects.len() => {
-			// 1:1 mapping by order
-			Ok(projects.iter().cloned().zip(output_specs).collect())
+		Ok(mapping)
+	} else {
+		// Traditional mapping: either broadcast or 1:1
+		match output_specs.len() {
+			0 => Err(anyhow!("at least one output must be specified")),
+			1 => {
+				// Single output for all projects (broadcast)
+				let spec = output_specs.into_iter().next().unwrap();
+				Ok(projects.iter().cloned().map(|p| (p, spec.clone())).collect())
+			}
+			n if n == projects.len() => {
+				// 1:1 mapping by order
+				Ok(projects.iter().cloned().zip(output_specs).collect())
+			}
+			n => Err(anyhow!(
+				"number of outputs ({}) must be 1 or equal to number of projects ({}), got {}",
+				n,
+				projects.len(),
+				n
+			)),
 		}
-		n => Err(anyhow!(
-			"number of outputs ({}) must be 1 or equal to number of projects ({}), got {}",
-			n,
-			projects.len(),
-			n
-		)),
 	}
 }
 
