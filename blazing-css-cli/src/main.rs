@@ -542,8 +542,15 @@ fn destination_path(project: &Project, output_spec: &OutputSpec) -> PathBuf {
 		project.root.clone()
 	};
 
+	// Handle absolute paths that may have been expanded from shell variables
 	if output_spec.path.is_absolute() {
-		output_spec.path.clone()
+		// If the absolute path is within the base directory, make it relative
+		if let Ok(relative) = output_spec.path.strip_prefix(&base) {
+			base.join(relative)
+		} else {
+			// Keep absolute path if it's outside the base directory
+			output_spec.path.clone()
+		}
 	} else {
 		base.join(&output_spec.path)
 	}
