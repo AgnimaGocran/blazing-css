@@ -1,8 +1,6 @@
 use std::{
 	collections::{HashMap, HashSet},
-	env,
-	fmt,
-	fs,
+	env, fmt, fs, io,
 	path::{Path, PathBuf},
 	sync::{
 		mpsc::{channel, Sender},
@@ -12,13 +10,19 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use blazing_css::{render_css_with_options, RenderOptions};
-use cargo_metadata::{camino::Utf8PathBuf, Metadata, MetadataCommand, PackageId};
+use cargo_metadata::{
+	camino::Utf8PathBuf, Error as CargoMetadataError, Metadata, MetadataCommand, PackageId,
+};
 use clap::{Args, Parser, Subcommand};
 use notify::{event::EventKind, Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use owo_colors::OwoColorize;
 
 #[derive(Parser, Debug)]
-#[command(name = "bzc", version, about = "Watch/render blazing-css styles for Rust projects")]
+#[command(
+	name = "bzc",
+	version,
+	about = "Watch/render blazing-css styles for Rust projects"
+)]
 pub struct Cli {
 	#[command(subcommand)]
 	pub command: Command,
@@ -66,9 +70,9 @@ pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
 	if spec.starts_with('$') {
 		// Parse $crate/path format
 		let rest = &spec[1..];
-		let slash_idx = rest.find('/').ok_or_else(|| {
-			anyhow!("invalid $crate syntax: expected $crate/path, got ${}", spec)
-		})?;
+		let slash_idx = rest
+			.find('/')
+			.ok_or_else(|| anyhow!("invalid $crate syntax: expected $crate/path, got ${}", spec))?;
 
 		let crate_name = &rest[..slash_idx];
 		if crate_name.is_empty() {
@@ -96,62 +100,41 @@ pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
 }
 
 pub fn resolve_output_mapping(
-	outputs: &[String],
-	projects: &[Project],
-	workspace: Option<&WorkspaceInventory>,
+	outputs: &[String], projects: &[Project],
 ) -> Result<Vec<(Project, OutputSpec)>> {
 	let output_specs: Vec<OutputSpec> = outputs
 		.iter()
 		.map(|s| parse_output_spec(s))
 		.collect::<Result<_>>()?;
 
-	// Check if all outputs use $crate syntax
-	let all_use_crate_syntax = output_specs.iter().all(|spec| spec.target_crate.is_some());
+	if output_specs.is_empty() {
+		return Err(anyhow!("at least one output must be specified"));
+	}
 
-	if all_use_crate_syntax {
-		// Each output specifies its target crate explicitly
-		let mut mapping = Vec::new();
-		for output_spec in output_specs {
-			let crate_name = output_spec.target_crate.as_ref().unwrap();
-
-			// Find target project in workspace
-			let target_project = if let Some(ws) = workspace {
-				if let Some(path) = ws.path_by_name(crate_name) {
-					// Create a Project with the crate's name and path from workspace
-					Project {
-						name: crate_name.clone(),
-						root: path,
-					}
-				} else {
-					return Err(anyhow!("crate '{}' not found in workspace", crate_name));
-				}
-			} else {
-				return Err(anyhow!("workspace not available for $crate syntax"));
-			};
-
-			mapping.push((target_project, output_spec));
+	match output_specs.len() {
+		1 => {
+			// Single output for all projects (broadcast)
+			let spec = output_specs.into_iter().next().unwrap();
+			Ok(projects
+				.iter()
+				.cloned()
+				.map(|project| (project, spec.clone()))
+				.collect())
 		}
-		Ok(mapping)
-	} else {
-		// Traditional mapping: either broadcast or 1:1
-		match output_specs.len() {
-			0 => Err(anyhow!("at least one output must be specified")),
-			1 => {
-				// Single output for all projects (broadcast)
-				let spec = output_specs.into_iter().next().unwrap();
-				Ok(projects.iter().cloned().map(|p| (p, spec.clone())).collect())
-			}
-			n if n == projects.len() => {
-				// 1:1 mapping by order
-				Ok(projects.iter().cloned().zip(output_specs).collect())
-			}
-			n => Err(anyhow!(
-				"number of outputs ({}) must be 1 or equal to number of projects ({}), got {}",
-				n,
-				projects.len(),
-				n
-			)),
+		n if n == projects.len() => {
+			// 1:1 mapping by order
+			Ok(projects
+				.iter()
+				.cloned()
+				.zip(output_specs.into_iter())
+				.collect())
 		}
+		n => Err(anyhow!(
+			"number of outputs ({}) must be 1 or equal to number of projects ({}), got {}",
+			n,
+			projects.len(),
+			n
+		)),
 	}
 }
 
@@ -172,30 +155,32 @@ pub fn run(args: Cli) -> Result<()> {
 
 fn run_render(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
-	let output_mapping = resolve_output_mapping(&args.output, &projects, workspace)?;
+	let output_mapping = resolve_output_mapping(&args.output, &projects)?;
 
 	for (project, output_spec) in &output_mapping {
-		render_project(project, output_spec, args.break_points.clone())?;
+		render_project(project, output_spec, args.break_points.clone(), workspace)?;
 	}
 	Ok(())
 }
 
 fn run_watch(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<()> {
 	let projects = resolve_projects(args, workspace)?;
-	let output_mapping = resolve_output_mapping(&args.output, &projects, workspace)?;
+	let output_mapping = resolve_output_mapping(&args.output, &projects)?;
 
 	for (project, output_spec) in &output_mapping {
-		render_project(project, output_spec, args.break_points.clone())?;
+		render_project(project, output_spec, args.break_points.clone(), workspace)?;
 	}
-	watch_projects(projects, output_mapping, args.break_points.clone())
+	watch_projects(output_mapping, args.break_points.clone(), workspace)
 }
 
-fn render_project(project: &Project, output_spec: &OutputSpec, break_points: Option<Vec<u32>>) -> Result<()> {
-	let destination = destination_path(project, output_spec);
+fn render_project(
+	project: &Project, output_spec: &OutputSpec, break_points: Option<Vec<u32>>,
+	workspace: Option<&WorkspaceInventory>,
+) -> Result<()> {
+	let destination = destination_path(project, output_spec, workspace)?;
 	if let Some(parent) = destination.parent() {
-		fs::create_dir_all(parent).with_context(|| {
-			format!("failed to create output directory {}", parent.display())
-		})?;
+		fs::create_dir_all(parent)
+			.with_context(|| format!("failed to create output directory {}", parent.display()))?;
 	}
 
 	let arg_value = output_argument(output_spec, &destination);
@@ -215,29 +200,36 @@ fn render_project(project: &Project, output_spec: &OutputSpec, break_points: Opt
 }
 
 fn watch_projects(
-	projects: Vec<Project>,
-	output_mapping: Vec<(Project, OutputSpec)>,
-	break_points: Option<Vec<u32>>,
+	output_mapping: Vec<(Project, OutputSpec)>, break_points: Option<Vec<u32>>,
+	workspace: Option<&WorkspaceInventory>,
 ) -> Result<()> {
 	let (tx, rx) = channel::<WatchMessage>();
 	let mut watchers = Vec::new();
 
 	// Collect unique projects from output_mapping for watching
-	let mut unique_projects: Vec<&Project> = Vec::new();
-	let mut project_to_output: HashMap<&Project, Vec<&OutputSpec>> = HashMap::new();
-	for (project, output_spec) in &output_mapping {
-		project_to_output.entry(project).or_insert_with(Vec::new).push(output_spec);
+	let mut unique_projects: Vec<Project> = Vec::new();
+	let mut project_to_output: HashMap<String, Vec<OutputSpec>> = HashMap::new();
+	for (project, output_spec) in output_mapping {
+		project_to_output
+			.entry(project.name.clone())
+			.or_insert_with(Vec::new)
+			.push(output_spec);
 		if !unique_projects.iter().any(|p| p.name == project.name) {
 			unique_projects.push(project);
 		}
 	}
 
 	for (idx, project) in unique_projects.iter().enumerate() {
-		let mut watcher = RecommendedWatcher::new(create_event_handler(idx, tx.clone()), Config::default())
-			.context("failed to initialize file watcher")?;
+		let mut watcher =
+			RecommendedWatcher::new(create_event_handler(idx, tx.clone()), Config::default())
+				.context("failed to initialize file watcher")?;
 
 		let src = project.root.join("src");
-		let watch_path = if src.exists() { src } else { project.root.clone() };
+		let watch_path = if src.exists() {
+			src
+		} else {
+			project.root.clone()
+		};
 		if !watch_path.exists() {
 			return Err(anyhow!(
 				"cannot watch project {} at {}; path does not exist",
@@ -268,14 +260,16 @@ fn watch_projects(
 				}
 
 				if let Some(project) = unique_projects.get(idx) {
-					if let Some(output_specs) = project_to_output.get(project) {
+					if let Some(output_specs) = project_to_output.get(&project.name) {
 						for output_spec in output_specs {
 							log_changed_paths(project, &rust_paths);
-							if let Err(err) = render_project(project, output_spec, break_points.clone()) {
-								log_error(format!(
-									"failed to rebuild {}: {err:#}",
-									project.name
-								));
+							if let Err(err) = render_project(
+								project,
+								output_spec,
+								break_points.clone(),
+								workspace,
+							) {
+								log_error(format!("failed to rebuild {}: {err:#}", project.name));
 							}
 						}
 					}
@@ -283,10 +277,7 @@ fn watch_projects(
 			}
 			WatchMessage::Error { idx, error } => {
 				if let Some(project) = unique_projects.get(idx) {
-					log_error(format!(
-						"watcher error for {}: {error}",
-						project.name
-					));
+					log_error(format!("watcher error for {}: {error}", project.name));
 				} else {
 					log_error(format!("watcher error: {error}"));
 				}
@@ -298,7 +289,9 @@ fn watch_projects(
 	Ok(())
 }
 
-fn resolve_projects(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) -> Result<Vec<Project>> {
+fn resolve_projects(
+	args: &CommandArgs, workspace: Option<&WorkspaceInventory>,
+) -> Result<Vec<Project>> {
 	let projects = if args.project.is_empty() {
 		vec![resolve_default_project(workspace)?]
 	} else {
@@ -312,7 +305,9 @@ fn resolve_projects(args: &CommandArgs, workspace: Option<&WorkspaceInventory>) 
 	Ok(projects)
 }
 
-fn create_event_handler(idx: usize, tx: Sender<WatchMessage>) -> impl Fn(Result<Event, notify::Error>) {
+fn create_event_handler(
+	idx: usize, tx: Sender<WatchMessage>,
+) -> impl Fn(Result<Event, notify::Error>) {
 	move |res| match res {
 		Ok(event) => {
 			let _ = tx.send(WatchMessage::Event { idx, event });
@@ -357,10 +352,7 @@ fn log_changed_paths(project: &Project, paths: &[PathBuf]) {
 		.map(|path| format_relative_to_cli(path))
 		.collect::<Vec<_>>()
 		.join(", ");
-	log_change(format!(
-		"change detected in {}: {}",
-		project.name, rendered
-	));
+	log_change(format!("change detected in {}: {}", project.name, rendered));
 }
 
 pub fn format_relative_to_cli(path: &Path) -> String {
@@ -449,7 +441,9 @@ impl LogKind {
 	}
 }
 
-fn resolve_named_projects(names: &[String], workspace: Option<&WorkspaceInventory>) -> Result<Vec<Project>> {
+fn resolve_named_projects(
+	names: &[String], workspace: Option<&WorkspaceInventory>,
+) -> Result<Vec<Project>> {
 	let cwd = env::current_dir().context("failed to read current directory")?;
 	let mut resolved = Vec::new();
 	for name in names {
@@ -505,18 +499,28 @@ struct WorkspaceInventory {
 
 impl WorkspaceInventory {
 	fn load() -> Result<Self> {
-		let metadata = MetadataCommand::new()
-			.no_deps()
-			.exec()
-			.context("failed to invoke cargo metadata")?;
+		let metadata =
+			Self::load_metadata_with_fallback().context("failed to invoke cargo metadata")?;
 		Self::from_metadata(metadata)
 	}
 
+	fn load_metadata_with_fallback() -> std::result::Result<Metadata, CargoMetadataError> {
+		let mut command = MetadataCommand::new();
+		command.no_deps();
+
+		match command.exec() {
+			Ok(metadata) => Ok(metadata),
+			Err(err) if is_missing_cargo(&err) => {
+				let mut fallback = MetadataCommand::new();
+				fallback.cargo_path("cargo").no_deps();
+				fallback.exec()
+			}
+			Err(err) => Err(err),
+		}
+	}
+
 	fn from_metadata(metadata: Metadata) -> Result<Self> {
-		let WorkspaceMembers {
-			by_name,
-			by_path,
-		} = collect_workspace_members(&metadata)?;
+		let WorkspaceMembers { by_name, by_path } = collect_workspace_members(&metadata)?;
 
 		Ok(Self { by_name, by_path })
 	}
@@ -528,6 +532,13 @@ impl WorkspaceInventory {
 	fn name_by_path(&self, path: &Path) -> Option<&str> {
 		let canonical = canonicalize(path);
 		self.by_path.get(&canonical).map(String::as_str)
+	}
+}
+
+fn is_missing_cargo(err: &CargoMetadataError) -> bool {
+	match err {
+		CargoMetadataError::Io(io_err) => io_err.kind() == io::ErrorKind::NotFound,
+		_ => false,
 	}
 }
 
@@ -566,21 +577,19 @@ fn canonicalize(path: &Path) -> PathBuf {
 	path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub fn destination_path(project: &Project, output_spec: &OutputSpec) -> PathBuf {
+pub(crate) fn destination_path(
+	project: &Project, output_spec: &OutputSpec, workspace: Option<&WorkspaceInventory>,
+) -> Result<PathBuf> {
 	let base = if let Some(ref crate_name) = output_spec.target_crate {
-		// Find the target crate in workspace
-		let workspace = WorkspaceInventory::load().ok();
-		if let Some(ws) = workspace {
-			if let Some(path) = ws.path_by_name(crate_name) {
-				path
-			} else {
-				log_warn(format!("crate '{}' not found in workspace, using project root", crate_name));
-				project.root.clone()
-			}
-		} else {
-			log_warn(format!("workspace not available, using project root for $crate '{}'", crate_name));
-			project.root.clone()
-		}
+		let ws = workspace.ok_or_else(|| {
+			anyhow!(
+				"workspace metadata is required to resolve $crate '{}'",
+				crate_name
+			)
+		})?;
+
+		ws.path_by_name(crate_name)
+			.ok_or_else(|| anyhow!("crate '{}' not found in workspace", crate_name))?
 	} else {
 		project.root.clone()
 	};
@@ -589,19 +598,19 @@ pub fn destination_path(project: &Project, output_spec: &OutputSpec) -> PathBuf 
 	if output_spec.path.is_absolute() {
 		// If the absolute path is within the base directory, make it relative
 		if let Ok(relative) = output_spec.path.strip_prefix(&base) {
-			base.join(relative)
+			Ok(base.join(relative))
 		} else if output_spec.path.starts_with("/") {
 			// Handle paths like "/assets/file.css" (from empty shell variables)
 			// by stripping the leading "/" and making it relative to base
 			let path_str = output_spec.path.to_string_lossy();
 			let relative_path = path_str.strip_prefix('/').unwrap_or(&path_str);
-			base.join(relative_path)
+			Ok(base.join(relative_path))
 		} else {
 			// Keep absolute path if it's outside the base directory
-			output_spec.path.clone()
+			Ok(output_spec.path.clone())
 		}
 	} else {
-		base.join(&output_spec.path)
+		Ok(base.join(&output_spec.path))
 	}
 }
 

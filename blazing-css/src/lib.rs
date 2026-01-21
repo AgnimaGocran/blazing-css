@@ -6,7 +6,9 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use blazing_css_core::{canonical_segments_from_stream, hash_css_segments, is_array_value, parse_array_value};
+use blazing_css_core::{
+	canonical_segments_from_stream, hash_css_segments, is_array_value, parse_array_value,
+};
 pub use blazing_css_macro::css;
 use itertools::Itertools;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -53,7 +55,12 @@ pub fn render_css_with_options(
 	}
 
 	let styles_path = manifest_dir.join(file_name);
-	write_stylesheet(&styles_path, &manifest_dir, &gathered, options.break_points.as_ref())?;
+	write_stylesheet(
+		&styles_path,
+		&manifest_dir,
+		&gathered,
+		options.break_points.as_ref(),
+	)?;
 
 	Ok(())
 }
@@ -204,13 +211,18 @@ fn format_css_block(hash: &str, segments: &[String], break_points: Option<&Vec<u
 	}
 
 	// If no multi-value arrays, extract first value from single-value arrays and remove brackets
-	let processed_segments: Vec<String> = segments.iter().map(|seg| {
-		if let Some((property, value)) = seg.split_once(':') {
-			let value_trimmed = value.trim();
-			if is_array_value(value_trimmed) {
-				if let Some(array_values) = parse_array_value(value_trimmed) {
-					if let Some(first_value) = array_values.first() {
-						format!("{}: {}", property.trim(), first_value)
+	let processed_segments: Vec<String> = segments
+		.iter()
+		.map(|seg| {
+			if let Some((property, value)) = seg.split_once(':') {
+				let value_trimmed = value.trim();
+				if is_array_value(value_trimmed) {
+					if let Some(array_values) = parse_array_value(value_trimmed) {
+						if let Some(first_value) = array_values.first() {
+							format!("{}: {}", property.trim(), first_value)
+						} else {
+							seg.clone()
+						}
 					} else {
 						seg.clone()
 					}
@@ -220,10 +232,8 @@ fn format_css_block(hash: &str, segments: &[String], break_points: Option<&Vec<u
 			} else {
 				seg.clone()
 			}
-		} else {
-			seg.clone()
-		}
-	}).collect();
+		})
+		.collect();
 
 	format!(
 		".{hash} {{\n{body}\n}}",
@@ -291,7 +301,10 @@ fn format_media_queries_block(hash: &str, segments: &[String], break_points: &[u
 		}
 
 		let body = format_css_segments(&media_segments, 2);
-		rules.push(format!("{} {{\n\t.{} {{\n{}\n\t}}\n}}", media_condition, hash, body));
+		rules.push(format!(
+			"{} {{\n\t.{} {{\n{}\n\t}}\n}}",
+			media_condition, hash, body
+		));
 	}
 
 	// Add fallback rule for screens larger than the last breakpoint
