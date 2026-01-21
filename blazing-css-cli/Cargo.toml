@@ -11,6 +11,13 @@ clap = { version = "4.5", features = ["derive"] }
 notify = { version = "5.1", default-features = true }
 owo-colors = "4.1"
 
+[dev-dependencies]
+tempfile = "3.10"
+
+[lib]
+name = "blazing_css_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bzc"
 path = "src/main.rs"
