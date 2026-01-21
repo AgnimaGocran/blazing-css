@@ -1,10 +1,14 @@
 use std::{
 	collections::{HashMap, HashSet},
-	env, fmt, fs, io,
+	env,
+	ffi::OsString,
+	fmt,
+	fs,
+	io,
 	path::{Path, PathBuf},
 	sync::{
+		mpsc::{channel, Sender},
 		OnceLock,
-		mpsc::{Sender, channel},
 	},
 };
 
@@ -570,10 +574,46 @@ impl WorkspaceInventory {
 	fn infer_workspace_member_path(&self, path: &Path) -> Option<PathBuf> {
 		let absolute = self.absolute_path_from_workspace(path);
 
-		if self.by_path.keys().any(|root| absolute.starts_with(root)) {
-			Some(absolute)
-		} else {
-			None
+		if self.is_workspace_member_path(&absolute) {
+			return Some(absolute);
+		}
+
+		self.normalize_absolute_path(&absolute)
+			.filter(|normalized| self.is_workspace_member_path(normalized))
+	}
+
+	fn is_workspace_member_path(&self, path: &Path) -> bool {
+		self.by_path.keys().any(|root| path.starts_with(root))
+	}
+
+	fn normalize_absolute_path(&self, path: &Path) -> Option<PathBuf> {
+		match path.canonicalize() {
+			Ok(canon) => Some(canon),
+			Err(_) => {
+				let mut pending: Vec<OsString> = Vec::new();
+				let mut current = path;
+
+				while let Some(parent) = current.parent() {
+					if let Some(name) = current.file_name() {
+						pending.push(name.to_os_string());
+					}
+
+					match parent.canonicalize() {
+						Ok(mut canon_parent) => {
+							for component in pending.iter().rev() {
+								canon_parent.push(component);
+							}
+							return Some(canon_parent);
+						}
+						Err(_) => {
+							current = parent;
+							continue;
+						}
+					}
+				}
+
+				None
+			}
 		}
 	}
 }

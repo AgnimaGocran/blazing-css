@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::{
 	fs,
 	path::{Path, PathBuf},
@@ -432,6 +434,39 @@ mod destination_path_tests {
 		let expected = web_project.join("assets/ui.css");
 
 		assert_eq!(expected, actual);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_destination_path_handles_absolute_symlinked_paths() {
+		let temp_dir = create_temp_dir().unwrap();
+		let workspace_root = temp_dir.path();
+		let packages_root = workspace_root.join("packages");
+		fs::create_dir_all(&packages_root).unwrap();
+
+		let ui_project = create_test_project_structure(&packages_root, "ui").unwrap();
+		let web_project = create_test_project_structure(&packages_root, "web").unwrap();
+
+		let workspace = workspace_inventory_for_paths(workspace_root, &[
+			("ui", &ui_project),
+			("web", &web_project),
+		]);
+
+		let symlink_root = workspace_root.join("linked");
+		symlink(workspace_root, &symlink_root).unwrap();
+		let absolute_from_link = symlink_root.join("packages/web/assets/ui.css");
+
+		let project = Project {
+			name: "ui".to_string(),
+			root: ui_project.clone(),
+		};
+		let spec = OutputSpec {
+			target_crate: None,
+			path: absolute_from_link,
+		};
+
+		let destination = crate::destination_path(&project, &spec, Some(&workspace)).unwrap();
+		assert_eq!(destination, web_project.join("assets/ui.css"));
 	}
 }
 
