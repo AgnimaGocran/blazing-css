@@ -291,6 +291,41 @@ mod resolve_output_mapping_tests {
 			"packages/web/assets/web.css".to_string(),
 		]);
 	}
+
+	#[test]
+	fn test_watch_command_destinations_for_shell_expanded_paths() {
+		let temp_dir = create_temp_dir().unwrap();
+		let workspace_root = temp_dir.path();
+		let packages_root = workspace_root.join("packages");
+		fs::create_dir_all(&packages_root).unwrap();
+
+		let ui_path = create_test_project_structure(&packages_root, "ui").unwrap();
+		let web_path = create_test_project_structure(&packages_root, "web").unwrap();
+
+		let workspace =
+			workspace_inventory_for_paths(workspace_root, &[("ui", &ui_path), ("web", &web_path)]);
+
+		let projects = vec![
+			Project {
+				name: "ui".to_string(),
+				root: ui_path.clone(),
+			},
+			Project {
+				name: "web".to_string(),
+				root: web_path.clone(),
+			},
+		];
+
+		let destinations = destinations_for_projects(workspace_root, &workspace, &projects, &[
+			"packages/web/assets/ui.css",
+			"packages/web/assets/web.css",
+		]);
+
+		assert_eq!(destinations, vec![
+			"packages/web/assets/ui.css".to_string(),
+			"packages/web/assets/web.css".to_string(),
+		]);
+	}
 }
 
 #[cfg(test)]
