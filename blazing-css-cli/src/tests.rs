@@ -109,14 +109,14 @@ mod parse_output_spec_tests {
 
 	#[test]
 	fn test_parse_crate_syntax() {
-		let spec = parse_output_spec("$mycrate/styles.css").unwrap();
+		let spec = parse_output_spec("@mycrate/styles.css").unwrap();
 		assert_eq!(spec.target_crate, Some("mycrate".to_string()));
 		assert_eq!(spec.path, PathBuf::from("styles.css"));
 	}
 
 	#[test]
 	fn test_parse_crate_syntax_with_nested_path() {
-		let spec = parse_output_spec("$mycrate/assets/styles.css").unwrap();
+		let spec = parse_output_spec("@mycrate/assets/styles.css").unwrap();
 		assert_eq!(spec.target_crate, Some("mycrate".to_string()));
 		assert_eq!(spec.path, PathBuf::from("assets/styles.css"));
 	}
@@ -124,7 +124,7 @@ mod parse_output_spec_tests {
 	#[test]
 	fn test_parse_crate_syntax_without_slash() {
 		// Current implementation requires a slash after crate name
-		let result = parse_output_spec("$mycrate");
+		let result = parse_output_spec("@mycrate");
 		assert!(result.is_err());
 	}
 
@@ -143,7 +143,7 @@ mod parse_output_spec_tests {
 
 	#[test]
 	fn test_parse_crate_syntax_without_crate_name() {
-		let result = parse_output_spec("$/styles.css");
+		let result = parse_output_spec("@/styles.css");
 		assert!(result.is_err());
 		assert!(
 			result
@@ -155,10 +155,17 @@ mod parse_output_spec_tests {
 
 	#[test]
 	fn test_parse_crate_syntax_with_empty_path() {
-		let spec = parse_output_spec("$mycrate/").unwrap();
+		let spec = parse_output_spec("@mycrate/").unwrap();
 		assert_eq!(spec.target_crate, Some("mycrate".to_string()));
 		// Current implementation returns "." for empty path
 		assert_eq!(spec.path, PathBuf::from("."));
+	}
+
+	#[test]
+	fn test_parse_legacy_dollar_syntax_still_supported() {
+		let spec = parse_output_spec("$legacy/styles.css").unwrap();
+		assert_eq!(spec.target_crate, Some("legacy".to_string()));
+		assert_eq!(spec.path, PathBuf::from("styles.css"));
 	}
 }
 
@@ -236,7 +243,7 @@ mod resolve_output_mapping_tests {
 	fn test_mixed_syntax_succeeds() {
 		let temp_dir = create_temp_dir().unwrap();
 		let projects = create_test_projects(2, temp_dir.path()).unwrap();
-		let outputs = vec!["$project0/styles.css".to_string(), "output.css".to_string()];
+		let outputs = vec!["@project0/styles.css".to_string(), "output.css".to_string()];
 
 		let result = resolve_output_mapping(&outputs, &projects);
 		// Current implementation allows mixed syntax (broadcast mode)
@@ -249,7 +256,7 @@ mod resolve_output_mapping_tests {
 	fn test_crate_outputs_preserve_project_order() {
 		let temp_dir = create_temp_dir().unwrap();
 		let projects = create_test_projects(2, temp_dir.path()).unwrap();
-		let outputs = vec!["$shared/ui.css".to_string(), "$shared/web.css".to_string()];
+		let outputs = vec!["@shared/ui.css".to_string(), "@shared/web.css".to_string()];
 
 		let mapping = resolve_output_mapping(&outputs, &projects).unwrap();
 		assert_eq!(mapping.len(), 2);
@@ -284,8 +291,8 @@ mod resolve_output_mapping_tests {
 		];
 
 		let destinations = destinations_for_projects(workspace_root, &workspace, &projects, &[
-			"$web/assets/ui.css",
-			"$web/assets/web.css",
+			"@web/assets/ui.css",
+			"@web/assets/web.css",
 		]);
 
 		assert_eq!(destinations, vec![

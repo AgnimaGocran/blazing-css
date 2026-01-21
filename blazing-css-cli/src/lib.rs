@@ -2,13 +2,11 @@ use std::{
 	collections::{HashMap, HashSet},
 	env,
 	ffi::OsString,
-	fmt,
-	fs,
-	io,
+	fmt, fs, io,
 	path::{Path, PathBuf},
 	sync::{
-		mpsc::{channel, Sender},
 		OnceLock,
+		mpsc::{Sender, channel},
 	},
 };
 
@@ -71,36 +69,47 @@ pub fn parse_output_spec(spec: &str) -> Result<OutputSpec> {
 		return Err(anyhow!("output spec cannot be empty"));
 	}
 
-	if spec.starts_with('$') {
-		// Parse $crate/path format
-		let rest = &spec[1..];
-		let slash_idx = rest
-			.find('/')
-			.ok_or_else(|| anyhow!("invalid $crate syntax: expected $crate/path, got ${}", spec))?;
-
-		let crate_name = &rest[..slash_idx];
-		if crate_name.is_empty() {
-			return Err(anyhow!("crate name cannot be empty in ${}", spec));
+	if let Some(first) = spec.chars().next() {
+		if first == '$' || first == '@' {
+			return parse_crate_spec(spec, first);
 		}
-
-		let path_str = &rest[slash_idx + 1..];
-		let path = if path_str.is_empty() {
-			PathBuf::from(".")
-		} else {
-			PathBuf::from(path_str)
-		};
-
-		Ok(OutputSpec {
-			target_crate: Some(crate_name.to_string()),
-			path,
-		})
-	} else {
-		// Simple path without target crate
-		Ok(OutputSpec {
-			target_crate: None,
-			path: PathBuf::from(spec),
-		})
 	}
+
+	// Simple path without target crate
+	Ok(OutputSpec {
+		target_crate: None,
+		path: PathBuf::from(spec),
+	})
+}
+
+fn parse_crate_spec(spec: &str, marker: char) -> Result<OutputSpec> {
+	let rest = &spec[1..];
+	let slash_idx = rest.find('/').ok_or_else(|| {
+		anyhow!(
+			"invalid {}crate syntax: expected {}crate/path, got {}{}",
+			marker,
+			marker,
+			marker,
+			rest
+		)
+	})?;
+
+	let crate_name = &rest[..slash_idx];
+	if crate_name.is_empty() {
+		return Err(anyhow!("crate name cannot be empty in {}{}", marker, rest));
+	}
+
+	let path_str = &rest[slash_idx + 1..];
+	let path = if path_str.is_empty() {
+		PathBuf::from(".")
+	} else {
+		PathBuf::from(path_str)
+	};
+
+	Ok(OutputSpec {
+		target_crate: Some(crate_name.to_string()),
+		path,
+	})
 }
 
 pub fn resolve_output_mapping(
@@ -672,7 +681,7 @@ pub(crate) fn destination_path(
 	let base = if let Some(ref crate_name) = output_spec.target_crate {
 		let ws = workspace.ok_or_else(|| {
 			anyhow!(
-				"workspace metadata is required to resolve $crate '{}'",
+				"workspace metadata is required to resolve crate target '{}'",
 				crate_name
 			)
 		})?;
