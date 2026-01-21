@@ -3,18 +3,18 @@ use std::{
 	env, fmt, fs, io,
 	path::{Path, PathBuf},
 	sync::{
-		mpsc::{channel, Sender},
 		OnceLock,
+		mpsc::{Sender, channel},
 	},
 };
 
-use anyhow::{anyhow, Context, Result};
-use blazing_css::{render_css_with_options, RenderOptions};
+use anyhow::{Context, Result, anyhow};
+use blazing_css::{RenderOptions, render_css_with_options_in};
 use cargo_metadata::{
-	camino::Utf8PathBuf, Error as CargoMetadataError, Metadata, MetadataCommand, PackageId,
+	Error as CargoMetadataError, Metadata, MetadataCommand, PackageId, camino::Utf8PathBuf,
 };
 use clap::{Args, Parser, Subcommand};
-use notify::{event::EventKind, Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
 use owo_colors::OwoColorize;
 
 #[derive(Parser, Debug)]
@@ -189,12 +189,11 @@ fn render_project(
 		project.name,
 		format_relative_to_cli(&destination)
 	));
-	env::set_var("CARGO_MANIFEST_DIR", &project.root);
 	let options = RenderOptions {
 		emit_cargo_directives: false,
 		break_points,
 	};
-	render_css_with_options(&arg_value, options)
+	render_css_with_options_in(&arg_value, &project.root, options)
 		.map_err(|err| anyhow!("failed to render CSS for {}: {err}", project.name))?;
 	Ok(())
 }

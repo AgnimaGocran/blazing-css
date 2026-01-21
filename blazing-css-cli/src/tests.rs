@@ -4,10 +4,10 @@ use std::{
 	sync::OnceLock,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use tempfile::TempDir;
 
-use crate::{parse_output_spec, resolve_output_mapping, OutputSpec, Project, WorkspaceInventory};
+use crate::{OutputSpec, Project, WorkspaceInventory, parse_output_spec, resolve_output_mapping};
 
 // Helper function to create a temporary directory for testing
 fn create_temp_dir() -> Result<TempDir> {
@@ -29,7 +29,7 @@ fn create_test_project_structure(base: &Path, name: &str) -> Result<PathBuf> {
 			r#"[package]
 name = "{}"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 "#,
 			name
 		),
@@ -52,6 +52,39 @@ fn workspace_inventory_for_paths(root: &Path, members: &[(&str, &Path)]) -> Work
 			.map(|(name, path)| ((*name).to_string(), (*path).to_path_buf()))
 			.collect(),
 	)
+}
+
+fn destination_for_output(
+	workspace: &WorkspaceInventory, project_name: &str, project_root: &Path, output_path: &str,
+) -> PathBuf {
+	let project = Project {
+		name: project_name.to_string(),
+		root: project_root.to_path_buf(),
+	};
+	let spec = OutputSpec {
+		target_crate: None,
+		path: PathBuf::from(output_path),
+	};
+
+	crate::destination_path(&project, &spec, Some(workspace)).unwrap()
+}
+
+fn destinations_for_projects(
+	workspace_root: &Path, workspace: &WorkspaceInventory, projects: &[Project], outputs: &[&str],
+) -> Vec<String> {
+	let output_vec = outputs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+	let mapping = resolve_output_mapping(&output_vec, projects).unwrap();
+
+	mapping
+		.into_iter()
+		.map(|(project, spec)| {
+			let destination = crate::destination_path(&project, &spec, Some(workspace)).unwrap();
+			destination
+				.strip_prefix(workspace_root)
+				.map(|path| path.to_string_lossy().to_string())
+				.unwrap_or_else(|_| destination.to_string_lossy().to_string())
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -110,10 +143,12 @@ mod parse_output_spec_tests {
 	fn test_parse_crate_syntax_without_crate_name() {
 		let result = parse_output_spec("$/styles.css");
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("crate name cannot be empty"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("crate name cannot be empty")
+		);
 	}
 
 	#[test]
@@ -176,10 +211,12 @@ mod resolve_output_mapping_tests {
 
 		let result = resolve_output_mapping(&outputs, &projects);
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("number of outputs"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("number of outputs")
+		);
 	}
 
 	#[test]
@@ -218,6 +255,41 @@ mod resolve_output_mapping_tests {
 		assert_eq!(mapping[0].1.path, PathBuf::from("ui.css"));
 		assert_eq!(mapping[1].0.name, "project1");
 		assert_eq!(mapping[1].1.path, PathBuf::from("web.css"));
+	}
+
+	#[test]
+	fn test_watch_command_destinations_for_crate_outputs() {
+		let temp_dir = create_temp_dir().unwrap();
+		let workspace_root = temp_dir.path();
+		let packages_root = workspace_root.join("packages");
+		fs::create_dir_all(&packages_root).unwrap();
+
+		let ui_path = create_test_project_structure(&packages_root, "ui").unwrap();
+		let web_path = create_test_project_structure(&packages_root, "web").unwrap();
+
+		let workspace =
+			workspace_inventory_for_paths(workspace_root, &[("ui", &ui_path), ("web", &web_path)]);
+
+		let projects = vec![
+			Project {
+				name: "ui".to_string(),
+				root: ui_path.clone(),
+			},
+			Project {
+				name: "web".to_string(),
+				root: web_path.clone(),
+			},
+		];
+
+		let destinations = destinations_for_projects(workspace_root, &workspace, &projects, &[
+			"$web/assets/ui.css",
+			"$web/assets/web.css",
+		]);
+
+		assert_eq!(destinations, vec![
+			"packages/web/assets/ui.css".to_string(),
+			"packages/web/assets/web.css".to_string(),
+		]);
 	}
 }
 
@@ -308,25 +380,23 @@ mod destination_path_tests {
 	#[test]
 	fn test_destination_path_infers_workspace_crate_from_path() {
 		let temp_dir = create_temp_dir().unwrap();
-		let packages_dir = temp_dir.path().join("packages");
-		fs::create_dir_all(&packages_dir).unwrap();
-		let ui_path = create_test_project_structure(&packages_dir, "ui").unwrap();
-		let web_path = create_test_project_structure(&packages_dir, "web").unwrap();
+		let workspace_root = temp_dir.path();
+		let packages_root = workspace_root.join("packages");
+		fs::create_dir_all(&packages_root).unwrap();
 
-		let workspace =
-			workspace_inventory_for_paths(temp_dir.path(), &[("ui", &ui_path), ("web", &web_path)]);
+		let ui_project = create_test_project_structure(&packages_root, "ui").unwrap();
+		let web_project = create_test_project_structure(&packages_root, "web").unwrap();
 
-		let project = Project {
-			name: "ui".to_string(),
-			root: ui_path.clone(),
-		};
-		let spec = OutputSpec {
-			target_crate: None,
-			path: PathBuf::from("packages/web/assets/ui.css"),
-		};
+		let workspace = workspace_inventory_for_paths(workspace_root, &[
+			("ui", &ui_project),
+			("web", &web_project),
+		]);
 
-		let destination = crate::destination_path(&project, &spec, Some(&workspace)).unwrap();
-		assert_eq!(destination, web_path.join("assets/ui.css"));
+		let actual =
+			destination_for_output(&workspace, "ui", &ui_project, "packages/web/assets/ui.css");
+		let expected = web_project.join("assets/ui.css");
+
+		assert_eq!(expected, actual);
 	}
 }
 

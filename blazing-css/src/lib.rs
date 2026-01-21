@@ -35,7 +35,23 @@ pub fn render_css(file_name: &str) -> Result<(), Box<dyn Error>> {
 pub fn render_css_with_options(
 	file_name: &str, options: RenderOptions,
 ) -> Result<(), Box<dyn Error>> {
-	let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+	render_css_internal(file_name, options, None)
+}
+
+pub fn render_css_with_options_in(
+	file_name: &str, manifest_dir: &Path, options: RenderOptions,
+) -> Result<(), Box<dyn Error>> {
+	render_css_internal(file_name, options, Some(manifest_dir))
+}
+
+fn render_css_internal(
+	file_name: &str, options: RenderOptions, manifest_override: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+	let manifest_dir = if let Some(path) = manifest_override {
+		path.to_path_buf()
+	} else {
+		PathBuf::from(env::var("CARGO_MANIFEST_DIR")?)
+	};
 	if options.emit_cargo_directives {
 		println!("cargo:rerun-if-changed=build.rs");
 	}
