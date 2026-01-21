@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use tempfile::TempDir;
 
-use crate::{parse_output_spec, resolve_output_mapping, OutputSpec, Project};
+use crate::{parse_output_spec, resolve_output_mapping, OutputSpec, Project, WorkspaceInventory};
 
 // Helper function to create a temporary directory for testing
 fn create_temp_dir() -> Result<TempDir> {
@@ -42,6 +42,16 @@ fn set_test_current_dir(path: &Path) {
 	static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
 	TEST_DIR.set(path.to_path_buf()).unwrap();
 	std::env::set_current_dir(path).unwrap();
+}
+
+fn workspace_inventory_for_paths(root: &Path, members: &[(&str, &Path)]) -> WorkspaceInventory {
+	WorkspaceInventory::for_testing(
+		root.to_path_buf(),
+		members
+			.iter()
+			.map(|(name, path)| ((*name).to_string(), (*path).to_path_buf()))
+			.collect(),
+	)
 }
 
 #[cfg(test)]
@@ -140,7 +150,7 @@ mod resolve_output_mapping_tests {
 
 		let mapping = resolve_output_mapping(&outputs, &projects).unwrap();
 		assert_eq!(mapping.len(), 3);
-        for (_project, spec) in &mapping {
+		for (_project, spec) in &mapping {
 			assert_eq!(spec.target_crate, None);
 			assert_eq!(spec.path, PathBuf::from("styles.css"));
 		}
@@ -293,6 +303,30 @@ mod destination_path_tests {
 
 		let result = crate::destination_path(&project, &spec, None);
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_destination_path_infers_workspace_crate_from_path() {
+		let temp_dir = create_temp_dir().unwrap();
+		let packages_dir = temp_dir.path().join("packages");
+		fs::create_dir_all(&packages_dir).unwrap();
+		let ui_path = create_test_project_structure(&packages_dir, "ui").unwrap();
+		let web_path = create_test_project_structure(&packages_dir, "web").unwrap();
+
+		let workspace =
+			workspace_inventory_for_paths(temp_dir.path(), &[("ui", &ui_path), ("web", &web_path)]);
+
+		let project = Project {
+			name: "ui".to_string(),
+			root: ui_path.clone(),
+		};
+		let spec = OutputSpec {
+			target_crate: None,
+			path: PathBuf::from("packages/web/assets/ui.css"),
+		};
+
+		let destination = crate::destination_path(&project, &spec, Some(&workspace)).unwrap();
+		assert_eq!(destination, web_path.join("assets/ui.css"));
 	}
 }
 

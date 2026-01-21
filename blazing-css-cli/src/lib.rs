@@ -493,6 +493,7 @@ fn resolve_default_project(workspace: Option<&WorkspaceInventory>) -> Result<Pro
 }
 
 struct WorkspaceInventory {
+	workspace_root: PathBuf,
 	by_name: HashMap<String, PathBuf>,
 	by_path: HashMap<PathBuf, String>,
 }
@@ -520,9 +521,17 @@ impl WorkspaceInventory {
 	}
 
 	fn from_metadata(metadata: Metadata) -> Result<Self> {
-		let WorkspaceMembers { by_name, by_path } = collect_workspace_members(&metadata)?;
+		let WorkspaceMembers {
+			workspace_root,
+			by_name,
+			by_path,
+		} = collect_workspace_members(&metadata)?;
 
-		Ok(Self { by_name, by_path })
+		Ok(Self {
+			workspace_root,
+			by_name,
+			by_path,
+		})
 	}
 
 	fn path_by_name(&self, name: &str) -> Option<PathBuf> {
@@ -532,6 +541,41 @@ impl WorkspaceInventory {
 	fn name_by_path(&self, path: &Path) -> Option<&str> {
 		let canonical = canonicalize(path);
 		self.by_path.get(&canonical).map(String::as_str)
+	}
+
+	#[cfg(test)]
+	pub(crate) fn for_testing(workspace_root: PathBuf, members: Vec<(String, PathBuf)>) -> Self {
+		let mut by_name = HashMap::new();
+		let mut by_path = HashMap::new();
+		for (name, path) in members {
+			let canonical = canonicalize(&path);
+			by_name.insert(name.clone(), canonical.clone());
+			by_path.insert(canonical, name);
+		}
+
+		Self {
+			workspace_root: canonicalize(&workspace_root),
+			by_name,
+			by_path,
+		}
+	}
+
+	fn absolute_path_from_workspace(&self, path: &Path) -> PathBuf {
+		if path.is_absolute() {
+			path.to_path_buf()
+		} else {
+			self.workspace_root.join(path)
+		}
+	}
+
+	fn infer_workspace_member_path(&self, path: &Path) -> Option<PathBuf> {
+		let absolute = self.absolute_path_from_workspace(path);
+
+		if self.by_path.keys().any(|root| absolute.starts_with(root)) {
+			Some(absolute)
+		} else {
+			None
+		}
 	}
 }
 
@@ -543,6 +587,7 @@ fn is_missing_cargo(err: &CargoMetadataError) -> bool {
 }
 
 struct WorkspaceMembers {
+	workspace_root: PathBuf,
 	by_name: HashMap<String, PathBuf>,
 	by_path: HashMap<PathBuf, String>,
 }
@@ -551,6 +596,7 @@ fn collect_workspace_members(metadata: &Metadata) -> Result<WorkspaceMembers> {
 	let member_ids: HashSet<PackageId> = metadata.workspace_members.iter().cloned().collect();
 	let mut by_name = HashMap::new();
 	let mut by_path = HashMap::new();
+	let workspace_root = canonicalize(metadata.workspace_root.as_std_path());
 
 	for package in &metadata.packages {
 		if !member_ids.contains(&package.id) {
@@ -562,7 +608,11 @@ fn collect_workspace_members(metadata: &Metadata) -> Result<WorkspaceMembers> {
 		by_path.insert(canonicalize(&manifest_dir), package.name.clone());
 	}
 
-	Ok(WorkspaceMembers { by_name, by_path })
+	Ok(WorkspaceMembers {
+		workspace_root,
+		by_name,
+		by_path,
+	})
 }
 
 fn manifest_dir(path: &Utf8PathBuf) -> PathBuf {
@@ -590,6 +640,11 @@ pub(crate) fn destination_path(
 
 		ws.path_by_name(crate_name)
 			.ok_or_else(|| anyhow!("crate '{}' not found in workspace", crate_name))?
+	} else if let Some(ws) = workspace {
+		if let Some(path) = ws.infer_workspace_member_path(&output_spec.path) {
+			return Ok(path);
+		}
+		project.root.clone()
 	} else {
 		project.root.clone()
 	};
