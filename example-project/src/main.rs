@@ -1,4 +1,5 @@
 mod media;
+mod nesting;
 mod probe;
 
 use blazing_css::css;
@@ -10,4 +11,5 @@ fn main() {
 	});
 	probe::print_path();
 	media::print_path();
+	nesting::print_path();
 }

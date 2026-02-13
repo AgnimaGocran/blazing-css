@@ -140,6 +140,17 @@ pub fn hash_css_segments(segments: &[String]) -> String {
 	encode_hash(hash)
 }
 
+/// A CSS block with optional nested selector blocks (e.g. pseudo-classes, pseudo-elements).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CssBlock {
+	/// Selector suffix relative to parent (e.g. ":hover", "::before"). Empty for root block.
+	pub selector_suffix: String,
+	/// CSS properties in this block: "property: value"
+	pub segments: Vec<String>,
+	/// Nested blocks (e.g. &:hover { ... })
+	pub children: Vec<CssBlock>,
+}
+
 #[derive(Clone, Debug)]
 enum SimpleToken {
 	Ident(String),
@@ -235,6 +246,185 @@ impl DelimiterDepth {
 	fn is_zero(&self) -> bool {
 		self.paren == 0 && self.bracket == 0 && self.brace == 0
 	}
+}
+
+#[derive(Clone, Debug)]
+enum TopLevelItem {
+	Segment(Vec<SimpleToken>),
+	NestedBlock {
+		selector: Vec<SimpleToken>,
+		body: Vec<SimpleToken>,
+	},
+}
+
+/// Splits token stream into top-level segments (property: value;) and nested blocks (selector { ... }).
+fn split_into_items(tokens: &[SimpleToken]) -> Vec<TopLevelItem> {
+	let mut result = Vec::new();
+	let mut current = Vec::new();
+	let mut depth = DelimiterDepth::default();
+	let mut i = 0;
+
+	while i < tokens.len() {
+		let token = tokens[i].clone();
+
+		if let SimpleToken::Punct(ch) = &token {
+			match ch {
+				'(' => {
+					depth.paren += 1;
+					current.push(token);
+					i += 1;
+				}
+				')' => {
+					depth.paren = depth.paren.saturating_sub(1);
+					current.push(token);
+					i += 1;
+				}
+				'[' => {
+					depth.bracket += 1;
+					current.push(token);
+					i += 1;
+				}
+				']' => {
+					depth.bracket = depth.bracket.saturating_sub(1);
+					current.push(token);
+					i += 1;
+				}
+				'{' if depth.is_zero() => {
+					let selector = std::mem::take(&mut current);
+					depth.brace += 1;
+					i += 1;
+					let start = i;
+					while i < tokens.len() {
+						match &tokens[i] {
+							SimpleToken::Punct('{') => depth.brace += 1,
+							SimpleToken::Punct('}') => {
+								depth.brace = depth.brace.saturating_sub(1);
+								if depth.brace == 0 {
+									let body = tokens[start..i].to_vec();
+									i += 1;
+									result.push(TopLevelItem::NestedBlock { selector, body });
+									break;
+								}
+							}
+							_ => {}
+						}
+						i += 1;
+					}
+				}
+				'{' => {
+					depth.brace += 1;
+					current.push(token);
+					i += 1;
+				}
+				'}' => {
+					depth.brace = depth.brace.saturating_sub(1);
+					current.push(token);
+					i += 1;
+				}
+				';' if depth.is_zero() => {
+					if !current.is_empty() {
+						result.push(TopLevelItem::Segment(std::mem::take(&mut current)));
+					}
+					i += 1;
+				}
+				_ => {
+					current.push(token);
+					i += 1;
+				}
+			}
+		} else {
+			current.push(token);
+			i += 1;
+		}
+	}
+
+	if !current.is_empty() {
+		result.push(TopLevelItem::Segment(current));
+	}
+
+	result
+}
+
+/// Canonicalizes selector tokens (e.g. & : hover -> ":hover", & : : before -> "::before").
+fn canonicalize_selector(tokens: &[SimpleToken]) -> String {
+	let raw: String = tokens
+		.iter()
+		.map(|t| match t {
+			SimpleToken::Ident(s) => s.clone(),
+			SimpleToken::Literal(s) => s.clone(),
+			SimpleToken::Punct(c) => c.to_string(),
+		})
+		.collect::<Vec<_>>()
+		.join(" ");
+	let trimmed = raw.trim().trim_start_matches('&').trim();
+	// Collapse spaces around colons: ": hover" -> ":hover", ":: before" -> "::before"
+	let mut s = trimmed.replace(" : ", ":").replace(" :", ":").to_string();
+	while s.contains(": ") {
+		s = s.replace(": ", ":");
+	}
+	s
+}
+
+/// Parses a slice of tokens into a CssBlock (root or nested).
+fn parse_css_block(tokens: &[SimpleToken]) -> CssBlock {
+	let items = split_into_items(tokens);
+	let mut segments: Vec<String> = Vec::new();
+	let mut children: Vec<CssBlock> = Vec::new();
+
+	for item in items {
+		match item {
+			TopLevelItem::Segment(seg_tokens) => {
+				if let Some(seg) = canonicalize_segment_tokens(&seg_tokens) {
+					segments.push(seg);
+				}
+			}
+			TopLevelItem::NestedBlock { selector, body } => {
+				let selector_suffix = canonicalize_selector(&selector);
+				let child = parse_css_block(&body);
+				children.push(CssBlock {
+					selector_suffix,
+					segments: child.segments,
+					children: child.children,
+				});
+			}
+		}
+	}
+
+	sort_segments_by_property(&mut segments);
+
+	CssBlock {
+		selector_suffix: String::new(),
+		segments,
+		children,
+	}
+}
+
+/// Builds a canonical CssBlock from the macro token stream (supports nesting).
+pub fn canonical_css_block_from_stream(stream: &TokenStream2) -> CssBlock {
+	let tokens = flatten_stream(stream);
+	parse_css_block(&tokens)
+}
+
+/// Serializes a CssBlock to a canonical string for hashing (deterministic order).
+fn block_to_canonical_string(block: &CssBlock) -> String {
+	let mut parts = Vec::new();
+	parts.push(block.selector_suffix.clone());
+	parts.push(block.segments.join(";"));
+	let mut child_strs: Vec<String> = block
+		.children
+		.iter()
+		.map(block_to_canonical_string)
+		.collect();
+	child_strs.sort();
+	parts.push(child_strs.join("|"));
+	parts.join("\n")
+}
+
+/// Returns a hash string for the whole block tree (same content => same hash).
+pub fn hash_css_block(block: &CssBlock) -> String {
+	let canonical = block_to_canonical_string(block);
+	let hash = xxh32(canonical.as_bytes(), 0);
+	encode_hash(hash)
 }
 
 fn canonicalize_segment_tokens(tokens: &[SimpleToken]) -> Option<String> {
@@ -758,5 +948,75 @@ mod tests {
 			hash_css_segments(&segments_a),
 			hash_css_segments(&segments_b)
 		);
+	}
+
+	#[test]
+	fn flat_block_matches_segments() {
+		let stream: TokenStream2 = "color: red; padding: 10px;".parse().unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		assert!(block.selector_suffix.is_empty());
+		assert!(block.children.is_empty());
+		let expected = canonical_segments_from_stream(&stream);
+		assert_eq!(block.segments, expected);
+	}
+
+	#[test]
+	fn parses_nested_pseudo_class() {
+		let stream: TokenStream2 = r#"color: red; &:hover { color: blue; background: yellow; }"#
+			.parse()
+			.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		assert_eq!(block.segments, vec!["color: red"]);
+		assert_eq!(block.children.len(), 1);
+		let child = &block.children[0];
+		assert_eq!(child.selector_suffix, ":hover");
+		assert_eq!(child.segments, vec!["background: yellow", "color: blue"]);
+		assert!(child.children.is_empty());
+	}
+
+	#[test]
+	fn parses_nested_pseudo_element() {
+		let stream: TokenStream2 = r#"&::before { content: ""; display: block; }"#
+			.parse()
+			.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		assert!(block.segments.is_empty());
+		assert_eq!(block.children.len(), 1);
+		assert_eq!(block.children[0].selector_suffix, "::before");
+		assert_eq!(
+			block.children[0].segments,
+			vec!["content: \"\"", "display: block"]
+		);
+	}
+
+	#[test]
+	fn parses_deeply_nested() {
+		let stream: TokenStream2 = r#"
+			outline: none;
+			&:focus {
+				outline: none;
+				&::after { content: "focused"; }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		assert_eq!(block.segments, vec!["outline: none"]);
+		assert_eq!(block.children.len(), 1);
+		let focus = &block.children[0];
+		assert_eq!(focus.selector_suffix, ":focus");
+		assert_eq!(focus.segments, vec!["outline: none"]);
+		assert_eq!(focus.children.len(), 1);
+		assert_eq!(focus.children[0].selector_suffix, "::after");
+		assert_eq!(focus.children[0].segments, vec!["content: \"focused\""]);
+	}
+
+	#[test]
+	fn hash_css_block_deterministic() {
+		let stream: TokenStream2 = "color: red; &:hover { color: blue; }".parse().unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let h1 = hash_css_block(&block);
+		let h2 = hash_css_block(&block);
+		assert_eq!(h1, h2);
 	}
 }

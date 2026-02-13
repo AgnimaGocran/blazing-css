@@ -7,7 +7,7 @@ use std::{
 };
 
 use blazing_css_core::{
-	canonical_segments_from_stream, hash_css_segments, is_array_value, parse_array_value,
+	canonical_css_block_from_stream, hash_css_block, is_array_value, parse_array_value, CssBlock,
 };
 pub use blazing_css_macro::css;
 use itertools::Itertools;
@@ -116,9 +116,9 @@ fn scan_stream(stream: TokenStream, entries: &mut Vec<MacroEntry>) {
 					if let Some(TokenTree::Group(group)) = iter.next() {
 						if group.delimiter() == Delimiter::Brace {
 							let inner = group.stream();
-							let segments = canonical_segments_from_stream(&inner);
-							let hash = hash_css_segments(&segments);
-							entries.push(MacroEntry { hash, segments });
+							let block = canonical_css_block_from_stream(&inner);
+							let hash = hash_css_block(&block);
+							entries.push(MacroEntry { hash, block });
 							scan_stream(inner, entries);
 							continue;
 						}
@@ -157,7 +157,7 @@ fn write_stylesheet(
 					.to_string(),
 				styles = entries
 					.iter()
-					.map(|entry| format_css_block(&entry.hash, &entry.segments, break_points))
+					.map(|entry| format_css_block(&entry.hash, &entry.block, break_points))
 					.collect::<Vec<_>>()
 					.join("\n\n")
 			)
@@ -192,14 +192,10 @@ fn format_breakpoint_css_vars(break_points: &[u32]) -> String {
 	format!(":root {{\n{}\n}}", vars.join("\n"))
 }
 
-fn format_css_block(hash: &str, segments: &[String], break_points: Option<&Vec<u32>>) -> String {
-	if segments.is_empty() {
-		return format!(".{hash} {{\n}}", hash = hash);
-	}
+fn format_css_block(hash: &str, block: &CssBlock, break_points: Option<&Vec<u32>>) -> String {
+	let segments = &block.segments;
 
-	// Check if any segment has array values with multiple elements
-	// Single value in brackets [row] or no brackets row -> no media query
-	// Multiple values in brackets [row, column] -> media query
+	// Check if any root segment has array values with multiple elements (media queries)
 	let has_multi_value_array = segments.iter().any(|seg| {
 		if let Some((_, value)) = seg.split_once(':') {
 			let value_trimmed = value.trim();
@@ -217,25 +213,25 @@ fn format_css_block(hash: &str, segments: &[String], break_points: Option<&Vec<u
 		}
 	});
 
-	if has_multi_value_array {
+	let root_rules = if has_multi_value_array {
 		if let Some(bps) = break_points {
-			return format_media_queries_block(hash, segments, bps);
+			format_media_queries_block(hash, segments, bps)
 		} else {
-			// Should not happen with default break_points
-			return format_media_queries_block(hash, segments, &[640, 1024, 1440]);
+			format_media_queries_block(hash, segments, &[640, 1024, 1440])
 		}
-	}
-
-	// If no multi-value arrays, extract first value from single-value arrays and remove brackets
-	let processed_segments: Vec<String> = segments
-		.iter()
-		.map(|seg| {
-			if let Some((property, value)) = seg.split_once(':') {
-				let value_trimmed = value.trim();
-				if is_array_value(value_trimmed) {
-					if let Some(array_values) = parse_array_value(value_trimmed) {
-						if let Some(first_value) = array_values.first() {
-							format!("{}: {}", property.trim(), first_value)
+	} else {
+		let processed_segments: Vec<String> = segments
+			.iter()
+			.map(|seg| {
+				if let Some((property, value)) = seg.split_once(':') {
+					let value_trimmed = value.trim();
+					if is_array_value(value_trimmed) {
+						if let Some(array_values) = parse_array_value(value_trimmed) {
+							if let Some(first_value) = array_values.first() {
+								format!("{}: {}", property.trim(), first_value)
+							} else {
+								seg.clone()
+							}
 						} else {
 							seg.clone()
 						}
@@ -245,17 +241,45 @@ fn format_css_block(hash: &str, segments: &[String], break_points: Option<&Vec<u
 				} else {
 					seg.clone()
 				}
-			} else {
-				seg.clone()
-			}
-		})
-		.collect();
+			})
+			.collect();
 
-	format!(
-		".{hash} {{\n{body}\n}}",
-		hash = hash,
-		body = format_css_segments(&processed_segments, 1)
-	)
+		if processed_segments.is_empty() && block.children.is_empty() {
+			format!(".{hash} {{\n}}", hash = hash)
+		} else {
+			format!(
+				".{hash} {{\n{body}\n}}",
+				hash = hash,
+				body = format_css_segments(&processed_segments, 1)
+			)
+		}
+	};
+
+	let mut result = root_rules;
+	for child in &block.children {
+		if !result.is_empty() {
+			result.push_str("\n\n");
+		}
+		result.push_str(&format_css_tree(hash, child, ""));
+	}
+	result
+}
+
+/// Recursively formats a block and its children into selector groups.
+fn format_css_tree(hash: &str, block: &CssBlock, parent_suffix: &str) -> String {
+	let selector = format!(".{hash}{parent_suffix}{suffix}", suffix = block.selector_suffix);
+	let body = format_css_segments(&block.segments, 1);
+	let mut out = if body.is_empty() && block.children.is_empty() {
+		format!("{selector} {{\n}}")
+	} else {
+		format!("{selector} {{\n{body}\n}}")
+	};
+	let next_suffix = format!("{parent_suffix}{}", block.selector_suffix);
+	for child in &block.children {
+		out.push_str("\n\n");
+		out.push_str(&format_css_tree(hash, child, &next_suffix));
+	}
+	out
 }
 
 fn format_css_segments(segments: &[String], indent_level: usize) -> String {
@@ -363,5 +387,67 @@ fn get_bp_name(index: usize) -> &'static str {
 #[derive(Debug)]
 struct MacroEntry {
 	hash: String,
-	segments: Vec<String>,
+	block: CssBlock,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn format_nested_block_emits_pseudo_class() {
+		let block = CssBlock {
+			selector_suffix: String::new(),
+			segments: vec!["color: red".into(), "padding: 10px".into()],
+			children: vec![CssBlock {
+				selector_suffix: ":hover".into(),
+				segments: vec!["color: blue".into(), "background: yellow".into()],
+				children: vec![],
+			}],
+		};
+		let css = format_css_block("AbCdEf", &block, None);
+		assert!(css.contains(".AbCdEf {"));
+		assert!(css.contains("color: red"));
+		assert!(css.contains(".AbCdEf:hover {"));
+		assert!(css.contains("color: blue"));
+		assert!(css.contains("background: yellow"));
+	}
+
+	#[test]
+	fn format_nested_block_emits_pseudo_element() {
+		let block = CssBlock {
+			selector_suffix: String::new(),
+			segments: vec![],
+			children: vec![CssBlock {
+				selector_suffix: "::before".into(),
+				segments: vec!["content: \"\"".into(), "display: block".into()],
+				children: vec![],
+			}],
+		};
+		let css = format_css_block("XyZ", &block, None);
+		assert!(css.contains(".XyZ::before {"));
+		assert!(css.contains("content: \"\""));
+		assert!(css.contains("display: block"));
+	}
+
+	#[test]
+	fn format_deeply_nested_emits_concatenated_selector() {
+		let block = CssBlock {
+			selector_suffix: String::new(),
+			segments: vec!["outline: none".into()],
+			children: vec![CssBlock {
+				selector_suffix: ":focus".into(),
+				segments: vec!["outline: none".into()],
+				children: vec![CssBlock {
+					selector_suffix: "::after".into(),
+					segments: vec!["content: \"focused\"".into()],
+					children: vec![],
+				}],
+			}],
+		};
+		let css = format_css_block("Root", &block, None);
+		assert!(css.contains(".Root:focus {"));
+		assert!(css.contains(".Root:focus::after {"));
+		assert!(css.contains("content: \"focused\""));
+	}
 }
