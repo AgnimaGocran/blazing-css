@@ -49,7 +49,8 @@ pub fn encode_hash(mut value: u32) -> String {
 }
 
 pub fn canonical_segments(body: &str) -> Vec<String> {
-	body.split(';')
+	let mut segments: Vec<String> = body
+		.split(';')
 		.filter_map(|segment| {
 			let trimmed = segment.trim();
 			if trimmed.is_empty() {
@@ -58,7 +59,10 @@ pub fn canonical_segments(body: &str) -> Vec<String> {
 				Some(normalize_segment(trimmed))
 			}
 		})
-		.collect()
+		.collect();
+
+	sort_segments_by_property(&mut segments);
+	segments
 }
 
 pub fn hash_css_body(body: &str) -> String {
@@ -105,10 +109,25 @@ fn normalize_segment(segment: &str) -> String {
 
 pub fn canonical_segments_from_stream(stream: &TokenStream2) -> Vec<String> {
 	let tokens = flatten_stream(stream);
-	split_segments(&tokens)
+	let mut segments: Vec<String> = split_segments(&tokens)
 		.into_iter()
 		.filter_map(|segment| canonicalize_segment_tokens(&segment))
-		.collect()
+		.collect();
+
+	sort_segments_by_property(&mut segments);
+	segments
+}
+
+fn sort_segments_by_property(segments: &mut [String]) {
+	segments.sort_by(|left, right| segment_property(left).cmp(segment_property(right)));
+}
+
+fn segment_property(segment: &str) -> &str {
+	if let Some((property, _)) = segment.split_once(':') {
+		property.trim()
+	} else {
+		segment.trim()
+	}
 }
 
 pub fn canonical_body_from_stream(stream: &TokenStream2) -> String {
@@ -704,11 +723,11 @@ mod tests {
 			.unwrap();
 		let segments = canonical_segments_from_stream(&stream);
 		assert_eq!(segments, vec![
-			"display: grid",
 			"border-radius: 1rem",
-			"overflow: hidden",
 			"box-shadow: 0 12px 30px rgba(15, 15, 15, 0.35)",
+			"display: grid",
 			"justify-content: flex-start",
+			"overflow: hidden",
 			"width: 100%"
 		]);
 	}
@@ -721,8 +740,23 @@ mod tests {
 				.unwrap();
 		let segments = canonical_segments_from_stream(&stream);
 		assert_eq!(segments, vec![
-			"width: calc(100% - 2rem)",
-			"transform: translateY(10px) rotate(45deg)"
+			"transform: translateY(10px) rotate(45deg)",
+			"width: calc(100% - 2rem)"
 		]);
+	}
+
+	#[test]
+	fn hashes_equal_for_different_attribute_order() {
+		let a: TokenStream2 = "display: grid; width: 100%; gap: 1rem;".parse().unwrap();
+		let b: TokenStream2 = "gap: 1rem; display: grid; width: 100%;".parse().unwrap();
+
+		let segments_a = canonical_segments_from_stream(&a);
+		let segments_b = canonical_segments_from_stream(&b);
+
+		assert_eq!(segments_a, segments_b);
+		assert_eq!(
+			hash_css_segments(&segments_a),
+			hash_css_segments(&segments_b)
+		);
 	}
 }
