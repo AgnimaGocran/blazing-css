@@ -19,6 +19,8 @@ use clap::{Args, Parser, Subcommand};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher, event::EventKind};
 use owo_colors::OwoColorize;
 
+const BZC_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(
 	name = "bzc",
@@ -152,6 +154,8 @@ pub fn resolve_output_mapping(
 }
 
 pub fn run(args: Cli) -> Result<()> {
+	log_startup_version();
+
 	let workspace = match WorkspaceInventory::load() {
 		Ok(ws) => Some(ws),
 		Err(err) => {
@@ -388,6 +392,10 @@ fn cli_base_dir() -> &'static PathBuf {
 
 fn log_action(message: impl fmt::Display) {
 	log_message(LogTarget::Stdout, LogKind::Action, message);
+}
+
+fn log_startup_version() {
+	log_action(format!("bzc v{BZC_VERSION}"));
 }
 
 fn log_watch(message: impl fmt::Display) {

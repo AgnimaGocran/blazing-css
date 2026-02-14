@@ -569,6 +569,8 @@ struct MacroEntry {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::fs;
+	use std::time::{SystemTime, UNIX_EPOCH};
 
 	#[test]
 	fn format_nested_block_emits_pseudo_class() {
@@ -662,5 +664,42 @@ mod tests {
 		assert!(css.contains("\tfrom {"));
 		assert!(css.contains("\tto {"));
 		assert!(!css.contains(".HashId@keyframes"));
+	}
+
+	#[test]
+	fn process_file_parses_nested_hover_block_from_rust_source() {
+		let unique = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+		let path = std::env::temp_dir().join(format!("blazing_css_nested_hover_{unique}.rs"));
+		let source = r#"
+			fn demo() {
+				let _ = css! {
+					display: inline-flex;
+					align-items: center;
+					gap: 0.15rem;
+					padding: 0.1rem 0.35rem;
+					border-radius: 4px;
+					cursor: pointer;
+					font-size: 0.85rem;
+					&:hover { background: rgb(241, 245, 249); }
+				};
+			}
+		"#;
+		fs::write(&path, source).unwrap();
+
+		let entries = process_file(&path).unwrap();
+		fs::remove_file(&path).unwrap();
+
+		assert_eq!(entries.len(), 1);
+		let block = &entries[0].block;
+		assert_eq!(block.children.len(), 1);
+		assert_eq!(block.children[0].selector_suffix, ":hover");
+		assert_eq!(block.children[0].segments, vec!["background: rgb(241, 245, 249)"]);
+
+		let css = format_css_block("KZHQOo", block, None);
+		assert!(css.contains(".KZHQOo:hover {"));
+		assert!(!css.contains("&: hover"));
 	}
 }
