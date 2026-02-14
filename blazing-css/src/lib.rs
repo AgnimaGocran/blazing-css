@@ -193,7 +193,8 @@ fn format_breakpoint_css_vars(break_points: &[u32]) -> String {
 }
 
 fn format_css_block(hash: &str, block: &CssBlock, break_points: Option<&Vec<u32>>) -> String {
-	let segments = &block.segments;
+	let scoped_block = scope_keyframes_in_block(hash, block);
+	let segments = &scoped_block.segments;
 
 	// Check if any root segment has array values with multiple elements (media queries)
 	let has_multi_value_array = segments.iter().any(|seg| {
@@ -244,7 +245,7 @@ fn format_css_block(hash: &str, block: &CssBlock, break_points: Option<&Vec<u32>
 			})
 			.collect();
 
-		if processed_segments.is_empty() && block.children.is_empty() {
+		if processed_segments.is_empty() && scoped_block.children.is_empty() {
 			format!(".{hash} {{\n}}", hash = hash)
 		} else {
 			format!(
@@ -256,17 +257,31 @@ fn format_css_block(hash: &str, block: &CssBlock, break_points: Option<&Vec<u32>
 	};
 
 	let mut result = root_rules;
-	for child in &block.children {
+	for child in &scoped_block.children {
 		if !result.is_empty() {
 			result.push_str("\n\n");
 		}
-		result.push_str(&format_css_tree(hash, child, ""));
+		result.push_str(&format_css_tree(hash, child, "", false));
 	}
 	result
 }
 
 /// Recursively formats a block and its children into selector groups.
-fn format_css_tree(hash: &str, block: &CssBlock, parent_suffix: &str) -> String {
+fn format_css_tree(hash: &str, block: &CssBlock, parent_suffix: &str, in_keyframes: bool) -> String {
+	if is_at_rule_selector(&block.selector_suffix) {
+		return format_at_rule(hash, block, parent_suffix);
+	}
+
+	if in_keyframes {
+		let selector = block.selector_suffix.trim();
+		let body = format_css_segments(&block.segments, 1);
+		return if body.is_empty() && block.children.is_empty() {
+			format!("{selector} {{\n}}")
+		} else {
+			format!("{selector} {{\n{body}\n}}")
+		};
+	}
+
 	let selector = format!(".{hash}{parent_suffix}{suffix}", suffix = block.selector_suffix);
 	let body = format_css_segments(&block.segments, 1);
 	let mut out = if body.is_empty() && block.children.is_empty() {
@@ -277,9 +292,170 @@ fn format_css_tree(hash: &str, block: &CssBlock, parent_suffix: &str) -> String 
 	let next_suffix = format!("{parent_suffix}{}", block.selector_suffix);
 	for child in &block.children {
 		out.push_str("\n\n");
-		out.push_str(&format_css_tree(hash, child, &next_suffix));
+		out.push_str(&format_css_tree(hash, child, &next_suffix, false));
 	}
 	out
+}
+
+fn format_at_rule(hash: &str, block: &CssBlock, parent_suffix: &str) -> String {
+	let selector = normalize_at_rule_selector(&block.selector_suffix);
+	let is_keyframes = is_keyframes_rule(&selector);
+	let mut body_blocks: Vec<String> = Vec::new();
+
+	if !block.segments.is_empty() && !is_keyframes {
+		let scoped_selector = format!(".{hash}{parent_suffix}");
+		let scoped_body = format_css_segments(&block.segments, 1);
+		body_blocks.push(indent_css_block(
+			&format!("{scoped_selector} {{\n{scoped_body}\n}}"),
+			1,
+		));
+	}
+
+	for child in &block.children {
+		let child_css = if is_keyframes {
+			format_css_tree(hash, child, "", true)
+		} else {
+			format_css_tree(hash, child, parent_suffix, false)
+		};
+		body_blocks.push(indent_css_block(&child_css, 1));
+	}
+
+	if body_blocks.is_empty() {
+		format!("{selector} {{\n}}")
+	} else {
+		format!("{selector} {{\n{}\n}}", body_blocks.join("\n\n"))
+	}
+}
+
+fn indent_css_block(content: &str, indent_level: usize) -> String {
+	let indent = "\t".repeat(indent_level);
+	content
+		.lines()
+		.map(|line| format!("{indent}{line}"))
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+fn is_at_rule_selector(selector: &str) -> bool {
+	let trimmed = selector.trim_start();
+	trimmed.starts_with('@') || trimmed.starts_with("@ ")
+}
+
+fn normalize_at_rule_selector(selector: &str) -> String {
+	let mut normalized = selector.trim().replace("@ ", "@").replace(" - ", "-");
+	while normalized.contains("  ") {
+		normalized = normalized.replace("  ", " ");
+	}
+	normalized
+}
+
+fn keyframes_name_from_selector(selector: &str) -> Option<String> {
+	let normalized = normalize_at_rule_selector(selector);
+	let trimmed = normalized.trim();
+	let lowercase = trimmed.to_ascii_lowercase();
+	if !lowercase.starts_with("@keyframes") {
+		return None;
+	}
+
+	let name = trimmed["@keyframes".len()..].trim();
+	if name.is_empty() {
+		None
+	} else {
+		Some(name.to_string())
+	}
+}
+
+fn is_keyframes_rule(selector: &str) -> bool {
+	keyframes_name_from_selector(selector).is_some()
+}
+
+fn scope_keyframes_in_block(hash: &str, block: &CssBlock) -> CssBlock {
+	let mut mapping = BTreeMap::new();
+	collect_keyframe_names(block, hash, &mut mapping);
+	rewrite_block_with_keyframes(block, &mapping)
+}
+
+fn collect_keyframe_names(block: &CssBlock, hash: &str, mapping: &mut BTreeMap<String, String>) {
+	for child in &block.children {
+		if let Some(name) = keyframes_name_from_selector(&child.selector_suffix) {
+			mapping
+				.entry(name.clone())
+				.or_insert_with(|| format!("{name}-{hash}"));
+		}
+		collect_keyframe_names(child, hash, mapping);
+	}
+}
+
+fn rewrite_block_with_keyframes(block: &CssBlock, mapping: &BTreeMap<String, String>) -> CssBlock {
+	let selector_suffix = if let Some(name) = keyframes_name_from_selector(&block.selector_suffix) {
+		if let Some(scoped_name) = mapping.get(&name) {
+			format!("@keyframes {scoped_name}")
+		} else {
+			block.selector_suffix.clone()
+		}
+	} else {
+		block.selector_suffix.clone()
+	};
+
+	let segments = block
+		.segments
+		.iter()
+		.map(|segment| rewrite_animation_segment(segment, mapping))
+		.collect();
+	let children = block
+		.children
+		.iter()
+		.map(|child| rewrite_block_with_keyframes(child, mapping))
+		.collect();
+
+	CssBlock {
+		selector_suffix,
+		segments,
+		children,
+	}
+}
+
+fn rewrite_animation_segment(segment: &str, mapping: &BTreeMap<String, String>) -> String {
+	if let Some((property, value)) = segment.split_once(':') {
+		let property = property.trim();
+		if property == "animation" || property == "animation-name" {
+			let rewritten = replace_identifiers_in_value(value.trim(), mapping);
+			return format!("{property}: {rewritten}");
+		}
+	}
+	segment.to_string()
+}
+
+fn replace_identifiers_in_value(value: &str, mapping: &BTreeMap<String, String>) -> String {
+	let mut result = String::new();
+	let mut ident = String::new();
+
+	for ch in value.chars() {
+		if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+			ident.push(ch);
+			continue;
+		}
+
+		if !ident.is_empty() {
+			if let Some(replacement) = mapping.get(&ident) {
+				result.push_str(replacement);
+			} else {
+				result.push_str(&ident);
+			}
+			ident.clear();
+		}
+		result.push(ch);
+	}
+
+	if !ident.is_empty() {
+		if let Some(replacement) = mapping.get(&ident) {
+			result.push_str(replacement);
+		} else {
+			result.push_str(&ident);
+		}
+	}
+
+	result
 }
 
 fn format_css_segments(segments: &[String], indent_level: usize) -> String {
@@ -449,5 +625,42 @@ mod tests {
 		assert!(css.contains(".Root:focus {"));
 		assert!(css.contains(".Root:focus::after {"));
 		assert!(css.contains("content: \"focused\""));
+	}
+
+	#[test]
+	fn format_block_scopes_keyframes_and_animation_names() {
+		let block = CssBlock {
+			selector_suffix: String::new(),
+			segments: vec![
+				"animation: engine-pulse 0.8s ease-in-out infinite alternate".into(),
+				"background: rgb(234, 179, 8)".into(),
+			],
+			children: vec![CssBlock {
+				selector_suffix: "@keyframes engine-pulse".into(),
+				segments: vec![],
+				children: vec![
+					CssBlock {
+						selector_suffix: "from".into(),
+						segments: vec!["opacity: 0.3".into()],
+						children: vec![],
+					},
+					CssBlock {
+						selector_suffix: "to".into(),
+						segments: vec!["opacity: 1.0".into()],
+						children: vec![],
+					},
+				],
+			}],
+		};
+
+		let css = format_css_block("HashId", &block, None);
+		assert!(css.contains(".HashId {"));
+		assert!(css.contains(
+			"animation: engine-pulse-HashId 0.8s ease-in-out infinite alternate;"
+		));
+		assert!(css.contains("@keyframes engine-pulse-HashId {"));
+		assert!(css.contains("\tfrom {"));
+		assert!(css.contains("\tto {"));
+		assert!(!css.contains(".HashId@keyframes"));
 	}
 }

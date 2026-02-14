@@ -1019,4 +1019,55 @@ mod tests {
 		let h2 = hash_css_block(&block);
 		assert_eq!(h1, h2);
 	}
+
+	#[test]
+	fn parses_block_with_animation_and_keyframes() {
+		let stream: TokenStream2 = r#"
+			position: absolute;
+			top: 0.25rem;
+			right: 0.35rem;
+			width: 6px;
+			height: 6px;
+			border-radius: 999px;
+			background: rgb(234, 179, 8);
+			animation: engine-pulse 0.8s ease-in-out infinite alternate;
+			@keyframes engine-pulse {
+				from { opacity: 0.3; }
+				to { opacity: 1.0; }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+
+		assert_eq!(block.segments, vec![
+			"animation: engine-pulse 0.8s ease-in-out infinite alternate",
+			"background: rgb(234, 179, 8)",
+			"border-radius: 999px",
+			"height: 6px",
+			"position: absolute",
+			"right: 0.35rem",
+			"top: 0.25rem",
+			"width: 6px"
+		]);
+
+		assert_eq!(block.children.len(), 1);
+		let keyframes = &block.children[0];
+		assert!(keyframes.selector_suffix.contains("keyframes"));
+		assert!(keyframes.selector_suffix.contains("engine"));
+		assert!(keyframes.selector_suffix.contains("pulse"));
+		assert!(keyframes.segments.is_empty());
+		assert_eq!(keyframes.children.len(), 2);
+
+		assert_eq!(keyframes.children[0].selector_suffix, "from");
+		assert_eq!(keyframes.children[0].segments, vec!["opacity: 0.3"]);
+		assert_eq!(keyframes.children[1].selector_suffix, "to");
+		assert_eq!(keyframes.children[1].segments, vec!["opacity: 1.0"]);
+
+		let compact: TokenStream2 = "position:absolute;top:0.25rem;right:0.35rem;width:6px;height:6px;border-radius:999px;background:rgb(234,179,8);animation:engine-pulse 0.8s ease-in-out infinite alternate;@keyframes engine-pulse{from{opacity:0.3;}to{opacity:1.0;}}"
+			.parse()
+			.unwrap();
+		let compact_block = canonical_css_block_from_stream(&compact);
+		assert_eq!(hash_css_block(&block), hash_css_block(&compact_block));
+	}
 }
