@@ -117,10 +117,20 @@ fn scan_stream(stream: TokenStream, entries: &mut Vec<MacroEntry>) {
 					iter.next();
 					if let Some(TokenTree::Group(group)) = iter.next() {
 						if group.delimiter() == Delimiter::Brace {
+							let span = group.span();
+							let (line_start, line_end) = (
+								span.start().line as u32,
+								span.end().line as u32,
+							);
 							let inner = group.stream();
 							let block = canonical_css_block_from_stream(&inner);
 							let hash = hash_css_block(&block);
-							entries.push(MacroEntry { hash, block });
+							entries.push(MacroEntry {
+								hash,
+								block,
+								line_start,
+								line_end,
+							});
 							scan_stream(inner, entries);
 							continue;
 						}
@@ -150,19 +160,25 @@ fn write_stylesheet(
 	let content = files
 		.iter()
 		.map(|(file, entries)| {
-			format!(
-				"/* {file} */\n{styles}",
-				file = file
-					.strip_prefix(manifest_dir)
-					.unwrap_or(file)
-					.display()
-					.to_string(),
-				styles = entries
-					.iter()
-					.map(|entry| format_css_block(&entry.hash, &entry.block, break_points))
-					.collect::<Vec<_>>()
-					.join("\n\n")
-			)
+			let file_display = file
+				.strip_prefix(manifest_dir)
+				.unwrap_or(file)
+				.display()
+				.to_string();
+			entries
+				.iter()
+				.map(|entry| {
+					let block_css = format_css_block(&entry.hash, &entry.block, break_points);
+					format!(
+						"/* {}:{}-{} */\n{}",
+						file_display,
+						entry.line_start,
+						entry.line_end,
+						block_css
+					)
+				})
+				.collect::<Vec<_>>()
+				.join("\n\n")
 		})
 		.join("\n\n");
 
@@ -566,6 +582,8 @@ fn get_bp_name(index: usize) -> &'static str {
 struct MacroEntry {
 	hash: String,
 	block: CssBlock,
+	line_start: u32,
+	line_end: u32,
 }
 
 #[cfg(test)]

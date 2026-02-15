@@ -66,7 +66,7 @@ pub fn canonical_segments(body: &str) -> Vec<String> {
 }
 
 pub fn hash_css_body(body: &str) -> String {
-	let canonical = canonical_segments(body).join(";");
+	let canonical = segments_to_canonical(&canonical_segments(body));
 	let hash = xxh32(canonical.as_bytes(), 0);
 	encode_hash(hash)
 }
@@ -135,7 +135,7 @@ pub fn canonical_body_from_stream(stream: &TokenStream2) -> String {
 }
 
 pub fn hash_css_segments(segments: &[String]) -> String {
-	let canonical = segments.join(";");
+	let canonical = segments_to_canonical(segments);
 	let hash = xxh32(canonical.as_bytes(), 0);
 	encode_hash(hash)
 }
@@ -347,22 +347,36 @@ fn split_into_items(tokens: &[SimpleToken]) -> Vec<TopLevelItem> {
 
 /// Canonicalizes selector tokens (e.g. & : hover -> ":hover", & : : before -> "::before").
 fn canonicalize_selector(tokens: &[SimpleToken]) -> String {
-	let raw: String = tokens
-		.iter()
-		.map(|t| match t {
-			SimpleToken::Ident(s) => s.clone(),
-			SimpleToken::Literal(s) => s.clone(),
-			SimpleToken::Punct(c) => c.to_string(),
-		})
-		.collect::<Vec<_>>()
-		.join(" ");
-	let trimmed = raw.trim().trim_start_matches('&').trim();
-	// Collapse spaces around colons: ": hover" -> ":hover", ":: before" -> "::before"
-	let mut s = trimmed.replace(" : ", ":").replace(" :", ":").to_string();
-	while s.contains(": ") {
-		s = s.replace(": ", ":");
+	let mut out = String::new();
+	let mut prev_is_ident_or_literal = false;
+
+	for token in tokens {
+		match token {
+			SimpleToken::Ident(s) => {
+				// Пробел между двумя словами: "@keyframes spin", но не "fade" + "-" + "in"
+				if prev_is_ident_or_literal {
+					out.push(' ');
+				}
+				out.push_str(s);
+				prev_is_ident_or_literal = true;
+			}
+			SimpleToken::Literal(s) => {
+				if prev_is_ident_or_literal {
+					out.push(' ');
+				}
+				out.push_str(s);
+				prev_is_ident_or_literal = true;
+			}
+			SimpleToken::Punct(c) => {
+				// Пунктуация приклеивается без пробелов: @, :, -, (, ) и т.д.
+				out.push(*c);
+				prev_is_ident_or_literal = false;
+			}
+		}
 	}
-	s
+
+	let trimmed = out.trim().trim_start_matches('&').trim().to_string();
+	trimmed
 }
 
 /// Parses a slice of tokens into a CssBlock (root or nested).
@@ -405,24 +419,57 @@ pub fn canonical_css_block_from_stream(stream: &TokenStream2) -> CssBlock {
 	parse_css_block(&tokens)
 }
 
-/// Serializes a CssBlock to a canonical string for hashing (deterministic order).
+/// Serializes a CssBlock into a canonical CSS string for hashing.
+///
+/// For a flat block (no children) this produces the same string as
+/// `segments_to_canonical` — i.e. `hash_css_block` and `hash_css_segments`
+/// yield the same hash when there is no nesting.
+///
+/// For nested blocks the output looks like readable CSS:
+///   `display: flex; flex-direction: row; &:hover { background: red; }`
 fn block_to_canonical_string(block: &CssBlock) -> String {
-	let mut parts = Vec::new();
-	if !block.selector_suffix.is_empty() {
-		parts.push(block.selector_suffix.clone());
-	}
-	parts.push(block.segments.join(";"));
+	let mut out = segments_to_canonical(&block.segments);
+
 	let mut child_strs: Vec<String> = block
 		.children
 		.iter()
-		.map(block_to_canonical_string)
+		.map(|child| {
+			let inner = block_to_canonical_string(child);
+			let prefix = if child.selector_suffix.starts_with(':')
+				|| child.selector_suffix.starts_with("::") {
+				"&"
+			} else {
+				""
+			};
+			format!("{prefix}{} {{ {inner} }}", child.selector_suffix)
+		})
 		.collect();
 	child_strs.sort();
-	let children_joined = child_strs.join("|");
-	if !children_joined.is_empty() {
-		parts.push(children_joined);
+
+	for child_str in child_strs {
+		if !out.is_empty() {
+			out.push(' ');
+		}
+		out.push_str(&child_str);
 	}
-	parts.join("\n")
+
+	out
+}
+
+/// Canonical representation of segments: "prop: val; prop: val;"
+fn segments_to_canonical(segments: &[String]) -> String {
+	if segments.is_empty() {
+		return String::new();
+	}
+	let mut out = String::new();
+	for seg in segments {
+		if !out.is_empty() {
+			out.push(' ');
+		}
+		out.push_str(seg);
+		out.push(';');
+	}
+	out
 }
 
 /// Returns a hash string for the whole block tree (same content => same hash).
@@ -1074,5 +1121,279 @@ mod tests {
 			.unwrap();
 		let compact_block = canonical_css_block_from_stream(&compact);
 		assert_eq!(hash_css_block(&block), hash_css_block(&compact_block));
+	}
+
+	#[test]
+	fn hash_css_block_equals_hash_css_segments_for_flat_blocks() {
+		let stream: TokenStream2 = "display: grid; justify-content: center;"
+			.parse()
+			.unwrap();
+		let segments = canonical_segments_from_stream(&stream);
+		let block = canonical_css_block_from_stream(&stream);
+		assert_eq!(
+			hash_css_segments(&segments),
+			hash_css_block(&block),
+			"flat block hash must match segments hash"
+		);
+	}
+
+	#[test]
+	fn canonical_string_for_hover_block() {
+		let stream: TokenStream2 = r#"
+			color: red;
+			padding: 10px;
+			&:hover { background: blue; }
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		assert_eq!(
+			canonical,
+			"color: red; padding: 10px; &:hover { background: blue; }"
+		);
+	}
+
+	#[test]
+	fn canonical_string_for_keyframes_block() {
+		let stream: TokenStream2 = r#"
+			animation: spin 1s linear infinite;
+			@keyframes spin {
+				from { transform: rotate(0deg); }
+				to { transform: rotate(360deg); }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		assert_eq!(
+			canonical,
+			"animation: spin 1s linear infinite; @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }"
+		);
+	}
+
+	#[test]
+	fn canonical_string_for_media_block() {
+		let stream: TokenStream2 = r#"
+			display: grid;
+			gap: 1rem;
+			@media (max-width: 900px) {
+				display: flex;
+				flex-direction: column;
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		assert_eq!(
+			canonical,
+			"display: grid; gap: 1rem; @media(max-width:900px) { display: flex; flex-direction: column; }"
+		);
+	}
+
+	#[test]
+	fn canonical_string_for_deeply_nested() {
+		let stream: TokenStream2 = r#"
+			outline: none;
+			&:focus {
+				outline: none;
+				&::after { content: "focused"; }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		assert_eq!(
+			canonical,
+			"outline: none; &:focus { outline: none; &::after { content: \"focused\"; } }"
+		);
+	}
+
+	#[test]
+	fn different_nesting_produces_different_hashes() {
+		let a: TokenStream2 = "color: red; &:hover { color: blue; }".parse().unwrap();
+		let b: TokenStream2 = "color: red; &:focus { color: blue; }".parse().unwrap();
+		let c: TokenStream2 = "color: red;".parse().unwrap();
+
+		let ha = hash_css_block(&canonical_css_block_from_stream(&a));
+		let hb = hash_css_block(&canonical_css_block_from_stream(&b));
+		let hc = hash_css_block(&canonical_css_block_from_stream(&c));
+
+		assert_ne!(ha, hb, "hover vs focus must differ");
+		assert_ne!(ha, hc, "with nesting vs without must differ");
+		assert_ne!(hb, hc, "with nesting vs without must differ");
+	}
+
+	#[test]
+	fn keyframes_canonical_simple() {
+		let stream: TokenStream2 = r#"
+			@keyframes fade-in {
+				from { opacity: 0; }
+				to { opacity: 1; }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		assert_eq!(
+			canonical,
+			"@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }"
+		);
+	}
+
+	#[test]
+	fn keyframes_canonical_with_percentages() {
+		let stream: TokenStream2 = r#"
+			animation: pulse 2s ease infinite;
+			@keyframes pulse {
+				0% { transform: scale(1); }
+				50% { transform: scale(1.1); }
+				100% { transform: scale(1); }
+			}
+		"#
+		.parse()
+		.unwrap();
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		// дочерние блоки сортируются лексикографически
+		assert!(canonical.starts_with("animation: pulse 2s ease infinite; "));
+		assert!(canonical.contains("@keyframes pulse {"));
+		assert!(canonical.contains("0% { transform: scale(1); }"));
+		assert!(canonical.contains("50% { transform: scale(1.1); }"));
+		assert!(canonical.contains("100% { transform: scale(1); }"));
+	}
+
+	#[test]
+	fn keyframes_hash_same_regardless_of_formatting() {
+		let a: TokenStream2 = r#"
+			animation: spin 1s linear infinite;
+			@keyframes spin {
+				from { transform: rotate(0deg); }
+				to   { transform: rotate(360deg); }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		let b: TokenStream2 =
+			"animation:spin 1s linear infinite;@keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}"
+			.parse()
+			.unwrap();
+
+		assert_eq!(
+			hash_css_block(&canonical_css_block_from_stream(&a)),
+			hash_css_block(&canonical_css_block_from_stream(&b)),
+		);
+	}
+
+	#[test]
+	fn keyframes_hash_differs_for_different_animation_name() {
+		let a: TokenStream2 = r#"
+			animation: spin 1s linear infinite;
+			@keyframes spin {
+				from { opacity: 0; }
+				to { opacity: 1; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		let b: TokenStream2 = r#"
+			animation: fade 1s linear infinite;
+			@keyframes fade {
+				from { opacity: 0; }
+				to { opacity: 1; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		assert_ne!(
+			hash_css_block(&canonical_css_block_from_stream(&a)),
+			hash_css_block(&canonical_css_block_from_stream(&b)),
+			"different keyframes names must produce different hashes"
+		);
+	}
+
+	#[test]
+	fn keyframes_hash_differs_for_different_steps() {
+		let a: TokenStream2 = r#"
+			@keyframes pulse {
+				from { opacity: 0.3; }
+				to { opacity: 1.0; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		let b: TokenStream2 = r#"
+			@keyframes pulse {
+				from { opacity: 0; }
+				to { opacity: 1.0; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		assert_ne!(
+			hash_css_block(&canonical_css_block_from_stream(&a)),
+			hash_css_block(&canonical_css_block_from_stream(&b)),
+			"different keyframe step values must produce different hashes"
+		);
+	}
+
+	#[test]
+	fn keyframes_hash_differs_with_and_without_keyframes() {
+		let with_kf: TokenStream2 = r#"
+			animation: spin 1s linear infinite;
+			@keyframes spin {
+				from { opacity: 0; }
+				to { opacity: 1; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		let without_kf: TokenStream2 = "animation: spin 1s linear infinite;"
+			.parse()
+			.unwrap();
+
+		assert_ne!(
+			hash_css_block(&canonical_css_block_from_stream(&with_kf)),
+			hash_css_block(&canonical_css_block_from_stream(&without_kf)),
+			"block with keyframes must differ from block without"
+		);
+	}
+
+	#[test]
+	fn keyframes_hash_same_regardless_of_step_order() {
+		// from/to порядок не должен влиять — дочерние блоки сортируются
+		let a: TokenStream2 = r#"
+			@keyframes blink {
+				from { opacity: 0; }
+				to { opacity: 1; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		let b: TokenStream2 = r#"
+			@keyframes blink {
+				to { opacity: 1; }
+				from { opacity: 0; }
+			}
+		"#
+		.parse()
+		.unwrap();
+
+		assert_eq!(
+			hash_css_block(&canonical_css_block_from_stream(&a)),
+			hash_css_block(&canonical_css_block_from_stream(&b)),
+			"keyframe step order should not affect hash"
+		);
 	}
 }
