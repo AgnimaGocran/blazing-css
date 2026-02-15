@@ -408,7 +408,9 @@ pub fn canonical_css_block_from_stream(stream: &TokenStream2) -> CssBlock {
 /// Serializes a CssBlock to a canonical string for hashing (deterministic order).
 fn block_to_canonical_string(block: &CssBlock) -> String {
 	let mut parts = Vec::new();
-	parts.push(block.selector_suffix.clone());
+	if !block.selector_suffix.is_empty() {
+		parts.push(block.selector_suffix.clone());
+	}
 	parts.push(block.segments.join(";"));
 	let mut child_strs: Vec<String> = block
 		.children
@@ -416,7 +418,10 @@ fn block_to_canonical_string(block: &CssBlock) -> String {
 		.map(block_to_canonical_string)
 		.collect();
 	child_strs.sort();
-	parts.push(child_strs.join("|"));
+	let children_joined = child_strs.join("|");
+	if !children_joined.is_empty() {
+		parts.push(children_joined);
+	}
 	parts.join("\n")
 }
 

@@ -1,0 +1,261 @@
+use api::{AnalysisStatus, RepertoireMoveAnalysisRow, RepertoireNode};
+use blazing_css::css;
+use dioxus::prelude::*;
+
+use super::tree_utils::{
+	line_to_pairs, path_to_node, piece_symbol, siblings, score_for_engine, status_color,
+};
+
+#[component]
+fn EngineStatusDot(status: AnalysisStatus) -> Element {
+	let is_active = matches!(status, AnalysisStatus::Queued | AnalysisStatus::Running);
+	rsx! {
+		span {
+			class: css! {
+				display: inline-block;
+				width: 0.5rem;
+				height: 0.5rem;
+				border-radius: 999px;
+				@keyframes dot-pulse {
+					from { opacity: 0.3; transform: scale(0.8); }
+					to { opacity: 1.0; transform: scale(1.2); }
+				}
+			},
+			background_color: status_color(status),
+			animation: if is_active { "dot-pulse 0.8s ease-in-out infinite alternate" },
+		}
+	}
+}
+
+/// Current board line (san, uci, fen) → pairs (move_num, white_san, black_san) for display.
+fn current_line_to_pairs(
+	line: &[(String, String, String)],
+) -> Vec<(i32, Option<String>, Option<String>)> {
+	let mut pairs = Vec::new();
+	let mut i = 0;
+	let mut move_num = 1;
+	while i < line.len() {
+		let white_san = Some(line[i].0.clone());
+		i += 1;
+		let black_san = (i < line.len()).then(|| {
+			let s = line[i].0.clone();
+			i += 1;
+			s
+		});
+		pairs.push((move_num, white_san, black_san));
+		move_num += 1;
+	}
+	pairs
+}
+
+#[component]
+pub fn RepertoireMoveTree(
+	nodes: Vec<RepertoireNode>,
+	selected_id: Signal<Option<i32>>,
+	current_board_node_id: Option<i32>,
+	current_line_sans: Vec<(String, String, String)>,
+	analysis_rows: Vec<RepertoireMoveAnalysisRow>,
+	selected_engine: String,
+	on_select: EventHandler<RepertoireNode>,
+) -> Element {
+	let display_node_id = selected_id().or(current_board_node_id);
+	let path = display_node_id.and_then(|id| {
+		nodes.iter().find(|n| n.id == id).cloned().map(|n| path_to_node(&n, &nodes))
+	});
+	let pairs_from_tree = path.as_ref().map(|p| line_to_pairs(p));
+	let pairs_sans_only = (!current_line_sans.is_empty() && path.is_none())
+		.then(|| current_line_to_pairs(&current_line_sans));
+
+	rsx! {
+		div {
+			class: css! {
+				display: grid;
+				grid-template-columns: 2.5rem minmax(4rem, 1fr) minmax(4rem, 1fr);
+				gap: 0.2rem 0.4rem;
+				align-items: center;
+				width: 100%;
+			},
+			if let Some(pairs) = pairs_from_tree {
+				for (num, white_opt, black_opt) in pairs {
+					span {
+						class: css! {
+							grid-column: 1;
+							font-weight: 600;
+							color: rgb(100, 116, 139);
+							font-size: 0.9rem;
+							justify-self: end;
+						},
+						"{num}."
+					}
+					div {
+						class: css! {
+							grid-column: 2;
+							display: flex;
+							flex-wrap: wrap;
+							align-items: center;
+							gap: 0.25rem 0.4rem;
+							min-width: 0;
+						},
+						if let Some(ref w) = white_opt {
+							MoveCell {
+								node: w.clone(),
+								analysis_rows: analysis_rows.clone(),
+								selected_engine: selected_engine.clone(),
+								selected_id,
+								on_select: on_select.clone(),
+							}
+							for sib in siblings(w, &nodes) {
+								VariationCell {
+									node: sib.clone(),
+									on_select: on_select.clone(),
+								}
+							}
+						}
+					}
+					div {
+						class: css! {
+							grid-column: 3;
+							display: flex;
+							flex-wrap: wrap;
+							align-items: center;
+							gap: 0.25rem 0.4rem;
+							min-width: 0;
+						},
+						if let Some(ref b) = black_opt {
+							MoveCell {
+								node: b.clone(),
+								analysis_rows: analysis_rows.clone(),
+								selected_engine: selected_engine.clone(),
+								selected_id,
+								on_select: on_select.clone(),
+							}
+							for sib in siblings(b, &nodes) {
+								VariationCell {
+									node: sib.clone(),
+									on_select: on_select.clone(),
+								}
+							}
+						}
+					}
+				}
+			} else if let Some(pairs) = pairs_sans_only {
+				for (num, white_opt, black_opt) in pairs {
+					span {
+						class: css! {
+							grid-column: 1;
+							font-weight: 600;
+							color: rgb(100, 116, 139);
+							font-size: 0.9rem;
+							justify-self: end;
+						},
+						"{num}."
+					}
+					div {
+						class: css! { grid-column: 2; min-width: 0; },
+						if let Some(san) = white_opt {
+							span {
+								class: css! {
+									display: inline-block;
+									padding: 0.25rem 0.5rem;
+									border-radius: 4px;
+									font-weight: 500;
+								},
+								"{san}"
+							}
+						}
+					}
+					div {
+						class: css! { grid-column: 3; min-width: 0; },
+						if let Some(san) = black_opt {
+							span {
+								class: css! {
+									display: inline-block;
+									padding: 0.25rem 0.5rem;
+									border-radius: 4px;
+									font-weight: 500;
+								},
+								"{san}"
+							}
+						}
+					}
+				}
+			} else {
+				div {
+					class: css! {
+						grid-column: 1 / -1;
+						color: rgb(100, 116, 139);
+						font-size: 0.9rem;
+					},
+					"Нет ходов"
+				}
+			}
+		}
+	}
+}
+
+#[component]
+fn MoveCell(
+	node: RepertoireNode, analysis_rows: Vec<RepertoireMoveAnalysisRow>, selected_engine: String,
+	selected_id: Signal<Option<i32>>, on_select: EventHandler<RepertoireNode>,
+) -> Element {
+	let info = analysis_rows.iter().find(|row| row.node_id == node.id);
+	let eval_str = info.and_then(|row| score_for_engine(row, &selected_engine));
+	let is_active = selected_id() == Some(node.id);
+
+	rsx! {
+		span {
+			class: css! {
+				display: inline-flex;
+				align-items: center;
+				gap: 0.25rem;
+				padding: 0.25rem 0.5rem;
+				border-radius: 4px;
+				cursor: pointer;
+				font-weight: 500;
+				&:hover { background: rgb(241, 245, 249); }
+			},
+			background: if is_active { "rgb(226, 232, 240)" } else { "transparent" },
+			onclick: {
+				let n = node.clone();
+				move |_| on_select.call(n.clone())
+			},
+			span { class: css! { font-size: 110%; line-height: 1; }, "{piece_symbol(&node.san, &node.side)}" }
+			span { "{node.san}" }
+			if let Some(ref s) = eval_str {
+				span {
+					class: css! { font-size: 0.75rem; color: rgb(100, 116, 139); margin-left: 0.15rem; },
+					"{s}"
+				}
+			}
+			if let Some(row) = info {
+				EngineStatusDot { status: row.lc0_status }
+				EngineStatusDot { status: row.lunar_status }
+				EngineStatusDot { status: row.stockfish_status }
+			}
+		}
+	}
+}
+
+#[component]
+fn VariationCell(node: RepertoireNode, on_select: EventHandler<RepertoireNode>) -> Element {
+	rsx! {
+		span {
+			class: css! {
+				display: inline-flex;
+				align-items: center;
+				gap: 0.15rem;
+				padding: 0.1rem 0.35rem;
+				border-radius: 4px;
+				cursor: pointer;
+				font-size: 0.85rem;
+				&:hover { background: rgb(241, 245, 249); }
+			},
+			onclick: {
+				let n = node.clone();
+				move |_| on_select.call(n.clone())
+			},
+			span { class: css! { font-size: 110%; line-height: 1; }, "{piece_symbol(&node.san, &node.side)}" }
+			span { "{node.san}" }
+		}
+	}
+}
