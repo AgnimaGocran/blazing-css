@@ -1,7 +1,7 @@
 [package]
 name = "blazing-css"
-version = "0.1.12"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 blazing-css-core = { path = "../blazing-css-core" }

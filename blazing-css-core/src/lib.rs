@@ -1396,4 +1396,36 @@ mod tests {
 			"keyframe step order should not affect hash"
 		);
 	}
+
+	#[test]
+	fn hash_display_grid_justify_content_center() {
+		let stream: TokenStream2 = "display: grid; justify-content: center;"
+			.parse()
+			.unwrap();
+
+		let block = canonical_css_block_from_stream(&stream);
+		let canonical = block_to_canonical_string(&block);
+		let hash = hash_css_block(&block);
+
+		eprintln!("segments:  {:?}", block.segments);
+		eprintln!("canonical: {:?}", canonical);
+		eprintln!("hash:      {}", hash);
+
+		// Сегменты отсортированы по имени свойства
+		assert_eq!(block.segments, vec!["display: grid", "justify-content: center"]);
+		// Каноническая строка — нормальный CSS
+		assert_eq!(canonical, "display: grid; justify-content: center;");
+		// Хеш стабилен
+		assert_eq!(hash, hash_css_block(&block));
+
+		// hash_css_segments даёт тот же результат
+		let segments = canonical_segments_from_stream(&stream);
+		assert_eq!(hash_css_segments(&segments), hash);
+
+		// Другой порядок свойств — тот же хеш
+		let reordered: TokenStream2 = "justify-content: center; display: grid;"
+			.parse()
+			.unwrap();
+		assert_eq!(hash_css_block(&canonical_css_block_from_stream(&reordered)), hash);
+	}
 }

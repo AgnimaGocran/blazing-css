@@ -107,6 +107,7 @@ version = "0.1.12"
 dependencies = [
  "blazing-css-core",
  "proc-macro2",
+ "syn",
 ]
 
 [[package]]
@@ -232,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "example-project"
-version = "0.1.0"
+version = "0.1.12"
 dependencies = [
  "blazing-css",
 ]

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use blazing_css_core::CssBlock;
 
-use super::{format_css_block, process_file};
+use super::{css, format_css_block, process_file};
 
 #[test]
 fn format_nested_block_emits_pseudo_class() {
@@ -168,5 +168,164 @@ fn repertoire_css_output() {
 	assert!(
 		!full.contains("&:hover") && !full.contains("&: hover"),
 		"&:hover должен быть развёрнут в селектор, не оставаться как &"
+	);
+}
+
+/// Проверяет, что макрос css! и process_file дают одинаковый хеш
+/// для `display: grid; justify-content: center;`
+#[test]
+fn macro_and_process_file_produce_same_hash() {
+	// Хеш из макроса (compile-time)
+	let macro_hash = css! {
+		display: grid;
+		justify-content: center;
+	};
+
+	// Хеш из process_file (runtime, как делает CLI)
+	let unique = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap()
+		.as_nanos();
+	let path = std::env::temp_dir().join(format!("blazing_css_hash_check_{unique}.rs"));
+	let source = r#"
+		fn demo() {
+			let _ = css! {
+				display: grid;
+				justify-content: center;
+			};
+		}
+	"#;
+	fs::write(&path, source).unwrap();
+	let entries = process_file(&path).unwrap();
+	fs::remove_file(&path).unwrap();
+
+	assert_eq!(entries.len(), 1);
+	let cli_hash = &entries[0].hash;
+
+	eprintln!("macro hash:        {}", macro_hash);
+	eprintln!("process_file hash: {}", cli_hash);
+
+	assert_eq!(
+		macro_hash, cli_hash.as_str(),
+		"macro css! and process_file must produce identical hashes"
+	);
+}
+
+/// Воспроизведение бага: число+единица без пробела (0.02em) парсится rustc как float
+/// с экспонентой → "expected at least one digit in exponent".
+/// Тест проверяет, что компиляция крейта с css! { letter-spacing: 0.02em; } действительно падает.
+#[test]
+fn letter_spacing_0_02em_without_space_fails_compile() {
+	let unique = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap()
+		.as_nanos();
+	let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+	let blaze_path = manifest_dir
+		.canonicalize()
+		.unwrap()
+		.display()
+		.to_string()
+		.replace('\\', "/");
+	let tmp = std::env::temp_dir().join(format!("blazing_css_0_02em_bug_{unique}"));
+	let _ = fs::create_dir_all(tmp.join("src"));
+	let cargo_toml = format!(
+		r#"[package]
+name = "compile_fail_0_02em"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+blazing-css = {{ path = "{}" }}
+"#,
+		blaze_path
+	);
+	let main_rs = r#"
+use blazing_css::css;
+
+fn main() {
+	let _ = css! {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 1.1rem;
+		font-weight: 700;
+		letter-spacing: 0.02em;
+	};
+}
+"#;
+	fs::write(tmp.join("Cargo.toml"), cargo_toml).unwrap();
+	fs::write(tmp.join("src/main.rs"), main_rs).unwrap();
+	let status = std::process::Command::new("cargo")
+		.args(["build", "--quiet"])
+		.current_dir(&tmp)
+		.output()
+		.unwrap();
+	let _ = fs::remove_dir_all(&tmp);
+	assert!(
+		!status.status.success(),
+		"ожидалась ошибка компиляции (0.02em без пробела); stderr: {}",
+		String::from_utf8_lossy(&status.stderr)
+	);
+	assert!(
+		String::from_utf8_lossy(&status.stderr).contains("exponent"),
+		"ожидалось сообщение про exponent в stderr"
+	);
+}
+
+/// После фикса: вариант с пробелом (0.02 em) компилируется и даёт каноничный letter-spacing: 0.02em.
+#[test]
+fn letter_spacing_0_02_em_with_space_works() {
+	let hash = css! {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 1.1rem;
+		font-weight: 700;
+		letter-spacing: 0.02 em;
+	};
+	// Проверяем, что process_file даёт тот же хеш при записи "0.02 em"
+	let unique = SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap()
+		.as_nanos();
+	let path = std::env::temp_dir().join(format!("blazing_css_0_02_em_ok_{unique}.rs"));
+	let source = r#"
+		fn navbar() {
+			let _ = css! {
+				display: flex;
+				align-items: center;
+				gap: 0.5rem;
+				font-size: 1.1rem;
+				font-weight: 700;
+				letter-spacing: 0.02 em;
+			};
+		}
+	"#;
+	fs::write(&path, source).unwrap();
+	let entries = process_file(&path).unwrap();
+	fs::remove_file(&path).unwrap();
+	assert_eq!(entries.len(), 1);
+	assert_eq!(entries[0].hash.as_str(), hash);
+	// В каноничном выводе число и единица склеены: 0.02em
+	let block = &entries[0].block;
+	let seg = block
+		.segments
+		.iter()
+		.find(|s| s.starts_with("letter-spacing:"))
+		.expect("должен быть letter-spacing");
+	assert_eq!(seg.trim(), "letter-spacing: 0.02em");
+}
+
+/// Строковая форма css!("...") позволяет писать 0.02em без пробела (обход бага с exponent).
+#[test]
+fn letter_spacing_0_02em_string_form_works() {
+	let hash_block = css! {
+		letter-spacing: 0.02 em;
+	};
+	let hash_string = css!("letter-spacing: 0.02em;");
+	assert_eq!(
+		hash_block, hash_string,
+		"блочная форма (0.02 em) и строковая (0.02em) должны давать один хеш"
 	);
 }
