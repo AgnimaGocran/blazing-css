@@ -711,8 +711,9 @@ pub(crate) fn destination_path(
 		if let Ok(relative) = output_spec.path.strip_prefix(&base) {
 			Ok(base.join(relative))
 		} else if output_spec.path.starts_with("/") {
-			// Handle paths like "/assets/file.css" (from empty shell variables)
-			// by stripping the leading "/" and making it relative to base
+			// When a shell variable in an output path is empty (e.g. $OUT_DIR/assets/file.css
+			// where OUT_DIR is unset), the shell expands it to /assets/file.css. We treat
+			// that as a relative path under the project base rather than an absolute root path.
 			let path_str = output_spec.path.to_string_lossy();
 			let relative_path = path_str.strip_prefix('/').unwrap_or(&path_str);
 			Ok(base.join(relative_path))

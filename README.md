@@ -79,5 +79,11 @@ bzc watch [--project web,ui] assets/styles.css
 - With `--project`, `bzc` resolves each entry via the workspace `Cargo.toml`, then falls back to matching directories in the current folder.
 - `bzc` scans `src/**/*.rs`, tracks changes, and rewrites the CSS file every time.
 
+## Known limitations
+
+- The `css!` macro must be invoked with the exact identifier `css`. Aliased imports
+  (`use blazing_css::css as styles; styles! { ... }`) are not detected by the CLI
+  scanner and will be ignored.
+
 ## License
 [MIT](LICENSE)
