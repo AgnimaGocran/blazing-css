@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.14] - 2026-05-31
+
+Media queries don't support CSS custom properties, so the previously
+generated var(--bp-*) breakpoints were ignored by browsers.
+
+### Fixed
+- Refactor media query formatting to use iterator chains
+- Remove dead get_bp_name helper
+- Add known limitations section to README
+
 ## [0.1.13] - 2026-05-22
 
 ### Added
